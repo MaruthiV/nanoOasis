@@ -26,7 +26,8 @@ venv/
 checkpoints/
 wandb/
 
-# Data — commit only the smoke set
+# Data — commit only the smoke set (everything else is huge / generated on Modal)
 data/*
-!data/smoke/
+!data/smoke
+!data/smoke/**
 !data/.gitkeep
