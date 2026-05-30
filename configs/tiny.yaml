@@ -1,0 +1,55 @@
+# tiny tier: pipeline-validation only. Targets ~2.7M params total, MacBook MPS, ~30 min.
+# See docs/IMPLEMENTATION_PLAN.md "Model ladder" and docs/DECISIONS.md D008.
+
+seed: 0
+
+vae:
+  hidden_dim: 128          # 12 d^2 * (enc+dec) ~ 12 * 128^2 * 5 ~ 1.0M params
+  enc_layers: 2
+  dec_layers: 3
+  heads: 4                 # 128 / 4 = 32 head_dim
+  patch_size: 8            # 128/8 x 96/8 = 16 x 12 spatial grid -> 192 tokens
+  latent_channels: 16      # latent grid (B, 16, 12, 16)
+  kl_beta: 1.0e-6          # research_notes.md §0 -- keep KL near zero
+  mlp_ratio: 4
+
+dit:
+  hidden_dim: 128
+  depth: 4
+  heads: 4                 # head_dim = 32
+  head_dim: 32
+  patch_size: 2            # 16/2 x 12/2 = 8 x 6 = 48 spatial tokens per frame
+  context_frames: 4        # past frames the model conditions on (tiny tier)
+  num_actions: 6
+  mlp_ratio: 4
+
+diffusion:
+  # EDM preconditioning -- DECISIONS.md D001
+  sigma_data: 0.5          # placeholder; V4 measures the real value on trained VAE latents
+  sigma_min: 0.002
+  sigma_max: 80.0
+  rho: 7.0
+  # log-normal sigma sampling -- research_notes.md "loss formulation"
+  p_mean: -0.4
+  p_std: 1.0
+  # diffusion forcing per-frame sigma -- DECISIONS.md D002
+  forcing: true
+  num_sample_steps: 16     # teacher; LCM distill to 2 in Phase 6
+
+training:
+  device: auto             # cuda > mps > cpu auto-detect at runtime
+  batch_size: 4
+  lr: 1.0e-4
+  betas: [0.9, 0.95]       # DECISIONS.md D012
+  weight_decay: 0.0
+  warmup_steps: 200
+  total_steps: 5000        # ~30 min on MPS
+  grad_clip: 1.0
+  ema_decay: 0.9999
+  log_every: 50
+  val_every: 1000
+  ckpt_every: 1000
+
+data:
+  index_path: data/smoke/index.parquet
+  cache_size: 32
