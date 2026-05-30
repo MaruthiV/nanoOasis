@@ -185,11 +185,12 @@ class DiT(nn.Module):
                               time_cos=tc, time_sin=ts).items():
             self.register_buffer(name, val, persistent=False)
 
-    def forward(self, x, sigma, action):
-        # x: (B, T, C, H, W) noisy latent; sigma: (B, T) per-frame; action: (B, T) ints
+    def forward(self, x, t, action):
+        # x: (B, T, C, H, W) noisy latent; t: (B, T) per-frame conditioning scalar
+        # (EDM passes c_noise = 0.25·log σ here, not raw σ); action: (B, T) ints
         B, T = x.shape[:2]
         h = self.in_proj(patchify(x, self.patch))                    # (B, T, n_spat, d)
-        c = self.time_emb(sigma) + self.action_emb(action)           # (B, T, d) -- D005
+        c = self.time_emb(t) + self.action_emb(action)               # (B, T, d) -- D005
         shared = self.adaln_mod(F.silu(c)).view(B, T, 9, self.d)     # (B, T, 9, d)
 
         sp_rope = (self.row_cos, self.row_sin, self.col_cos, self.col_sin)
