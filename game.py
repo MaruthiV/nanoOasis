@@ -20,9 +20,22 @@ PLAYER_W, PLAYER_H = 8, 12
 SPAWN_X = TILE * 2
 SPAWN_Y = GROUND_Y
 
-# enemy sprite extents (px)
+# enemy + collectible sprite extents (px)
 WALKER_W, WALKER_H = 8, 8
 SPIKE_W, SPIKE_H = 8, 4
+COIN_W, COIN_H = 4, 4
+COIN_VALUE = 10
+
+# HUD: 3 zero-padded digits, top-right, 3x5 white-on-black font
+HUD_W, HUD_H = 13, 7
+HUD_X = W - HUD_W
+HUD_Y = 0
+
+# door sprite extents (px); door y in Level.door is the door's BOTTOM (top of supporting surface)
+DOOR_W, DOOR_H = 8, 16
+
+# level transition: 1..8 fade-out current level, 9..16 fade-in new level
+TRANSITION_FRAMES = 16
 
 # reach budget for the platform-graph BFS, in pixels (jump peak / max gap)
 MAX_REACH_DY = 40
@@ -122,6 +135,20 @@ DOOR = (
     "DDDDDDDD",
 )
 DOOR_COLORS = {"D": DB16[1], "f": DB16[4], "h": DB16[14]}
+
+# 3x5 hand-coded digits (no pygame.font -- see BUGS.md H006).
+DIGITS = {
+    "0": ("###", "#.#", "#.#", "#.#", "###"),
+    "1": (".#.", "##.", ".#.", ".#.", "###"),
+    "2": ("###", "..#", ".#.", "#..", "###"),
+    "3": ("###", "..#", ".##", "..#", "###"),
+    "4": ("#.#", "#.#", "###", "..#", "..#"),
+    "5": ("###", "#..", "###", "..#", "###"),
+    "6": ("###", "#..", "###", "#.#", "###"),
+    "7": ("###", "..#", ".#.", "#..", "#.."),
+    "8": ("###", "#.#", "###", "#.#", "###"),
+    "9": ("###", "#.#", "###", "..#", "###"),
+}
 
 
 class Player:
@@ -304,8 +331,24 @@ class Game:
         self.biome = self.level.biome
         self.score = 0
         self.deaths = 0
+        self.transition_frames = 0
         sx, sy = self.level.spawn
         self.player = Player(float(sx), float(sy))
+
+    def _enter_new_level(self) -> None:
+        # score, deaths, dying_frames intentionally persist across levels
+        new_seed = int(self.rng.integers(0, 2**31 - 1))
+        self.level = generate_level(new_seed)
+        self.biome = self.level.biome
+        sx, sy = self.level.spawn
+        p = self.player
+        p.x = float(sx)
+        p.y = float(sy)
+        p.vx = 0.0
+        p.vy = 0.0
+        p.on_ground = True
+        p.jump_held_frames = 0
+        p.dying_frames = 0
 
     def step(self, action: int) -> tuple[np.ndarray, float, bool]:
         p = self.player
@@ -323,6 +366,15 @@ class Game:
                 p.vy = 0.0
                 p.on_ground = True
                 p.jump_held_frames = 0
+            return self.render(), 0.0, False
+
+        # level transition: input frozen for 16 frames, level swap at the midpoint
+        if self.transition_frames > 0:
+            self.transition_frames += 1
+            if self.transition_frames == 9:
+                self._enter_new_level()
+            if self.transition_frames > TRANSITION_FRAMES:
+                self.transition_frames = 0
             return self.render(), 0.0, False
 
         left  = action in (1, 4)
@@ -349,15 +401,34 @@ class Game:
             p.jump_held_frames = 0
 
         # integrate first so the jump impulse moves the player by its full velocity
+        prev_y = p.y
         p.x += p.vx
         p.y += p.vy
         p.vy = min(p.vy + GRAVITY, TERMINAL_VEL)
+
+        # default airborne; ground/platform checks below may snap back to standing
+        p.on_ground = False
 
         if p.y >= GROUND_Y:
             p.y = GROUND_Y
             p.vy = 0.0
             p.on_ground = True
             p.jump_held_frames = 0
+        else:
+            # one-way platforms: land when feet crossed (or stayed on) a top from above
+            landed_y = None
+            for plat in self.level.platforms:
+                ptop = plat.top_px
+                if (prev_y <= ptop <= p.y
+                        and p.x + PLAYER_W > plat.left_px
+                        and p.x < plat.right_px):
+                    if landed_y is None or ptop < landed_y:
+                        landed_y = ptop
+            if landed_y is not None:
+                p.y = landed_y
+                p.vy = 0.0
+                p.on_ground = True
+                p.jump_held_frames = 0
 
         # walkers patrol their platform
         for e in self.level.enemies:
@@ -370,16 +441,30 @@ class Game:
                     e.x = e.plat_right - WALKER_W
                     e.vx = -e.vx
 
-        # collision -> death (G7 finishes the sequence)
         px0, py0 = p.x, p.y - PLAYER_H
-        for e in self.level.enemies:
-            if isinstance(e, Walker):
-                hit = _aabb(px0, py0, PLAYER_W, PLAYER_H, e.x, e.y, WALKER_W, WALKER_H)
+
+        # coins first -- spec: coins collected on the lethal frame still count
+        remaining = []
+        for cx, cy in self.level.coins:
+            if _aabb(px0, py0, PLAYER_W, PLAYER_H, cx, cy, COIN_W, COIN_H):
+                self.score += COIN_VALUE
             else:
-                hit = _aabb(px0, py0, PLAYER_W, PLAYER_H, e.x, e.y, SPIKE_W, SPIKE_H)
-            if hit:
-                p.dying_frames = 1
-                break
+                remaining.append((cx, cy))
+        self.level.coins = remaining
+
+        # door touch wins over enemy collision -- escape from danger
+        dx, dy = self.level.door
+        if _aabb(px0, py0, PLAYER_W, PLAYER_H, dx, dy - DOOR_H, DOOR_W, DOOR_H):
+            self.transition_frames = 1
+        else:
+            for e in self.level.enemies:
+                if isinstance(e, Walker):
+                    hit = _aabb(px0, py0, PLAYER_W, PLAYER_H, e.x, e.y, WALKER_W, WALKER_H)
+                else:
+                    hit = _aabb(px0, py0, PLAYER_W, PLAYER_H, e.x, e.y, SPIKE_W, SPIKE_H)
+                if hit:
+                    p.dying_frames = 1
+                    break
 
         return self.render(), 0.0, False
 
@@ -421,18 +506,87 @@ class Game:
         colors = RED_FLASH_COLORS if df > 0 and ((df - 1) // 2) % 2 == 0 else PLAYER_COLORS
         _blit(fb, px, py, PLAYER, colors)
 
+        # HUD: black box + 3 zero-padded digits, top-right. wrap at 999 so it always fits.
+        fb[HUD_Y:HUD_Y + HUD_H, HUD_X:HUD_X + HUD_W] = DB16[0]
+        s = f"{self.score % 1000:03d}"
+        white = DB16[15]
+        for i, ch in enumerate(s):
+            glyph = DIGITS[ch]
+            gx = HUD_X + 1 + i * 4
+            for j, row in enumerate(glyph):
+                for k, c in enumerate(row):
+                    if c == "#":
+                        fb[HUD_Y + 1 + j, gx + k] = white
+
+        # level transition darken pass -- darkness peaks at tf=8 (last old frame) and tf=9 (first new)
+        tf = self.transition_frames
+        if tf > 0:
+            darkness = tf / 8.0 if tf <= 8 else (TRANSITION_FRAMES + 1 - tf) / 8.0
+            if darkness >= 1.0:
+                fb[:] = 0
+            else:
+                fb = (fb.astype(np.float32) * (1.0 - darkness)).astype(np.uint8)
+
         return fb
+
+
+def _keys_to_action(left: bool, right: bool, jump: bool) -> int:
+    if left and right:                     # both held: cancel horizontals
+        return 3 if jump else 0
+    if left:
+        return 4 if jump else 1
+    if right:
+        return 5 if jump else 2
+    return 3 if jump else 0
+
+
+def play(seed: int = 0) -> None:
+    import pygame
+    pygame.init()
+    screen = pygame.display.set_mode((W * 4, H * 4))
+    pygame.display.set_caption("nanoOasis")
+    clock = pygame.time.Clock()
+
+    game = Game(seed=seed)
+    running = True
+    while running:
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                running = False
+            elif event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+                running = False
+
+        keys = pygame.key.get_pressed()
+        action = _keys_to_action(
+            keys[pygame.K_LEFT],
+            keys[pygame.K_RIGHT],
+            keys[pygame.K_SPACE],
+        )
+        frame, _, _ = game.step(action)
+        # pygame.surfarray uses (W, H, 3); see BUGS.md H005
+        surf = pygame.surfarray.make_surface(np.transpose(frame, (1, 0, 2)))
+        screen.blit(pygame.transform.scale(surf, (W * 4, H * 4)), (0, 0))
+        pygame.display.flip()
+        clock.tick(30)
+
+    pygame.quit()
 
 
 if __name__ == "__main__":
     import sys, os
-    import imageio.v3 as iio
 
     if "--preview" in sys.argv:
+        import imageio.v3 as iio
         os.makedirs("assets", exist_ok=True)
         for biome in BIOMES:
             g = Game(seed=0, biome=biome)
             iio.imwrite(f"assets/preview_{biome}.png", g.render())
             print(f"wrote assets/preview_{biome}.png")
+    elif "--play" in sys.argv:
+        seed = 0
+        if "--seed" in sys.argv:
+            seed = int(sys.argv[sys.argv.index("--seed") + 1])
+        play(seed=seed)
     else:
-        print("usage: python game.py --preview    (--play lands in G10)")
+        print("usage: python game.py --play [--seed N]   # interactive 512x384 window")
+        print("       python game.py --preview           # write assets/preview_*.png")
