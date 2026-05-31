@@ -1,0 +1,56 @@
+# launch tier: 4xH100 (or 4xH200/B200 if available), full dataset, the real launch run.
+# VAE d=256, 4+8 layers (~9.4M). DiT d=512, depth=16, ctx=16, shared AdaLN (~75M).
+
+seed: 0
+
+vae:
+  hidden_dim: 256          # d
+  enc_layers: 4
+  dec_layers: 8            # deeper decoder; 12 * 256^2 * 12 ~ 9.4M params
+  heads: 8                 # 256 / 8 = 32 head_dim
+  patch_size: 8
+  latent_channels: 16
+  kl_beta: 1.0e-6
+  mlp_ratio: 4
+  lpips_weight: 0.5        # perceptual loss weight; 0 disables. Tuned per SD3-class VAE conventions.
+
+dit:
+  hidden_dim: 512
+  depth: 16
+  heads: 8                 # head_dim = 64
+  head_dim: 64
+  patch_size: 2            # 48 spatial tok/frame
+  context_frames: 16       # full launch tier
+  num_actions: 6
+  mlp_ratio: 4
+
+diffusion:
+  # measured on val episodes 2026-05-31 using checkpoints/vae_small.pt on baseline data
+  # (1700 frames × 192 tokens × 16 channels -> torch.std). 4.58x the EDM default of 0.5.
+  # NOTE: re-measure after V6 (launch VAE) if it produces materially different latent magnitudes.
+  sigma_data: 2.29
+  sigma_min: 0.002
+  sigma_max: 80.0
+  rho: 7.0
+  p_mean: -0.4
+  p_std: 1.0
+  forcing: true
+  num_sample_steps: 16
+
+training:
+  device: auto
+  batch_size: 16           # smaller -> fewer cache misses per step on the full-tier 200-episode index
+  lr: 1.0e-4
+  betas: [0.9, 0.95]
+  weight_decay: 0.0
+  warmup_steps: 2000
+  total_steps: 100000
+  grad_clip: 1.0
+  ema_decay: 0.9999
+  log_every: 100
+  val_every: 2500
+  ckpt_every: 5000
+
+data:
+  index_path: data/full/index.parquet         # V5 generates this
+  cache_size: 220          # cache *all* train episodes (195) -> after warmup, zero data-loader misses

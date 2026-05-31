@@ -18,6 +18,23 @@ from vae import VAE
 from data import EpisodeWindowDataset
 
 
+def _maybe_init_wandb(config_name: str, cfg) -> object | None:
+    # Only init if WANDB_API_KEY is in the env (set via Modal Secret in cloud runs).
+    if not os.environ.get("WANDB_API_KEY"):
+        return None
+    try:
+        import wandb
+    except ImportError:
+        print("WANDB_API_KEY set but `wandb` not installed; skipping W&B logging.")
+        return None
+    return wandb.init(
+        project="nano-oasis",
+        name=f"vae-{config_name}",
+        config=OmegaConf.to_container(cfg, resolve=True),
+        save_code=False,
+    )
+
+
 def pick_device(spec: str) -> str:
     if spec != "auto":
         return spec
@@ -60,6 +77,7 @@ def main(config_name: str = "tiny", total_steps: int | None = None) -> None:
         betas=tuple(cfg.training.betas),
         weight_decay=cfg.training.weight_decay,
     )
+    wandb_run = _maybe_init_wandb(config_name, cfg)
 
     ckpt_dir = pathlib.Path("checkpoints")
     ckpt_dir.mkdir(exist_ok=True)
@@ -94,8 +112,19 @@ def main(config_name: str = "tiny", total_steps: int | None = None) -> None:
             mean_l1 = sum(recent_l1) / len(recent_l1)
             elapsed = time.time() - t0
             sps = (step + 1) / max(elapsed, 1e-6)
-            print(f"step {step:5d}  L1 {mean_l1:.4f}  KL {info['kl']:.4f}  "
+            lpips_str = f"  LPIPS {info['lpips']:.4f}" if info["lpips"] > 0 else ""
+            print(f"step {step:5d}  L1 {mean_l1:.4f}  KL {info['kl']:.4f}{lpips_str}  "
                   f"lr {lr:.2e}  {sps:.1f} steps/s  {elapsed:.0f}s")
+            if wandb_run is not None:
+                wandb_run.log({
+                    "train/l1":         info["l1"],
+                    "train/l1_smooth":  mean_l1,
+                    "train/kl":         info["kl"],
+                    "train/lpips":      info["lpips"],
+                    "train/lr":         lr,
+                    "throughput/steps_per_s": sps,
+                    "time/elapsed_s":   elapsed,
+                }, step=step)
 
         if step > 0 and step % cfg.training.ckpt_every == 0:
             torch.save({"model": model.state_dict(), "step": step,
@@ -109,6 +138,9 @@ def main(config_name: str = "tiny", total_steps: int | None = None) -> None:
     final_l1 = sum(recent_l1) / max(1, len(recent_l1))
     print(f"done. {step} steps, {elapsed:.0f}s, {step/elapsed:.1f} steps/s. "
           f"final L1 {final_l1:.4f}. saved {ckpt_path}")
+    if wandb_run is not None:
+        wandb_run.summary["final_l1"] = final_l1
+        wandb_run.finish()
 
 
 if __name__ == "__main__":

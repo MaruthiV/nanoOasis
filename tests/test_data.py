@@ -121,7 +121,8 @@ def test_parallel_writes_n_shards_and_alternates_bots(tmp_path):
     import multiprocessing as mp
     jobs = [(i, 200, str(tmp_path), i * 100_000) for i in range(4)]
     with mp.Pool(4) as pool:
-        rows = pool.map(_worker, jobs)
+        worker_rows = pool.map(_worker, jobs)
+    rows = [r for ws in worker_rows for r in ws]                # flatten worker -> shard rows
     write_index(rows, tmp_path / "index.parquet")
 
     shards = sorted(tmp_path.glob("ep_*.npz.zst"))

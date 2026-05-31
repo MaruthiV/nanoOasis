@@ -104,24 +104,42 @@ def write_shard(path: pathlib.Path, frames, actions, dones, level_seeds) -> None
     path.write_bytes(zstd.ZstdCompressor(level=3).compress(buf.getvalue()))
 
 
-def _worker(args: tuple) -> dict:
-    worker_id, n_frames, out_dir, seed = args
+def _worker(args: tuple) -> list[dict]:
+    # args: (worker_id, n_frames, out_dir, seed, episode_size=None)
+    # Splits n_frames into chunks of episode_size to keep per-worker RAM bounded.
+    # Returns a list of one index row per shard written.
+    worker_id, n_frames, out_dir, seed = args[:4]
+    episode_size = args[4] if len(args) > 4 and args[4] else n_frames
     out_dir = pathlib.Path(out_dir)
-    bot_cls = HeuristicBot if worker_id % 2 == 1 else RandomBot
-    frames, actions, dones, level_seeds = collect_episode(seed, n_frames, bot_cls=bot_cls)
-    shard = out_dir / f"ep_{worker_id:03d}.npz.zst"
-    write_shard(shard, frames, actions, dones, level_seeds)
-    n_level_changes = int((np.diff(level_seeds.astype(np.int64)) != 0).sum())
-    return {
-        "episode_id":        int(worker_id),
-        "path":              shard.name,
-        "length":            int(n_frames),
-        "n_dones":           int(dones.sum()),
-        "n_level_changes":   n_level_changes,
-        "bot_type":          bot_cls.__name__,
-        "worker_id":         int(worker_id),
-        "split":             "val" if worker_id % 20 == 0 else "train",
-    }
+    rows: list[dict] = []
+    written = 0
+    ep_idx = 0
+    while written < n_frames:
+        n = min(episode_size, n_frames - written)
+        bot_cls = HeuristicBot if (worker_id + ep_idx) % 2 == 1 else RandomBot
+        frames, actions, dones, level_seeds = collect_episode(seed + ep_idx, n, bot_cls=bot_cls)
+        if episode_size >= n_frames:
+            shard_name = f"ep_{worker_id:03d}.npz.zst"
+        else:
+            shard_name = f"ep_{worker_id:03d}_{ep_idx:04d}.npz.zst"
+        shard = out_dir / shard_name
+        write_shard(shard, frames, actions, dones, level_seeds)
+        n_level_changes = int((np.diff(level_seeds.astype(np.int64)) != 0).sum())
+        episode_id = worker_id * 10_000 + ep_idx
+        rows.append({
+            "episode_id":      int(episode_id),
+            "path":            shard.name,
+            "length":          int(n),
+            "n_dones":         int(dones.sum()),
+            "n_level_changes": n_level_changes,
+            "bot_type":        bot_cls.__name__,
+            "worker_id":       int(worker_id),
+            "split":           "val" if worker_id % 20 == 0 else "train",
+        })
+        written += n
+        ep_idx += 1
+        del frames, actions, dones, level_seeds            # free memory before next chunk
+    return rows
 
 
 def write_index(rows: list[dict], path: pathlib.Path) -> None:
@@ -146,10 +164,11 @@ def main() -> None:
 
     print(f"collecting {args.n_frames} frames across {args.workers} workers -> {out}")
     if args.workers == 1:
-        rows = [_worker(jobs[0])]
+        worker_rows = [_worker(jobs[0])]
     else:
         with mp.Pool(args.workers) as pool:
-            rows = pool.map(_worker, jobs)
+            worker_rows = pool.map(_worker, jobs)
+    rows = [r for ws in worker_rows for r in ws]                # flatten worker -> shard rows
 
     write_index(rows, out / "index.parquet")
     total = sum(r["length"] for r in rows)

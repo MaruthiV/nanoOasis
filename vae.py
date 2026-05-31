@@ -34,6 +34,8 @@ class VAE(nn.Module):
         self.N = self.Hp * self.Wp                              # 192 tokens
         self.latent_channels = cfg.latent_channels
         self.kl_beta = cfg.kl_beta
+        self.lpips_weight = float(getattr(cfg, "lpips_weight", 0.0))
+        self._lpips = None                                       # lazy-loaded; see loss()
         pix = P * P * 3                                          # 192 for P=8
 
         self.patch_proj = nn.Linear(pix, d)
@@ -91,6 +93,23 @@ class VAE(nn.Module):
     def loss(self, x: torch.Tensor, recon: torch.Tensor, mu: torch.Tensor, logvar: torch.Tensor):
         target = x.float() / 127.5 - 1.0 if x.dtype == torch.uint8 else x
         l1 = F.l1_loss(recon, target)
-        # KL to N(0, I), mean over batch + tokens
         kl = -0.5 * (1 + logvar - mu.pow(2) - logvar.exp()).mean()
-        return l1 + self.kl_beta * kl, {"l1": float(l1.detach()), "kl": float(kl.detach())}
+
+        lp = torch.tensor(0.0, device=recon.device)
+        if self.lpips_weight > 0:
+            if self._lpips is None:
+                import lpips                                     # lazy import -- only when enabled
+                self._lpips = lpips.LPIPS(net="vgg").to(recon.device).eval()
+                for p in self._lpips.parameters():
+                    p.requires_grad = False
+            # LPIPS expects (B, 3, H, W) in [-1, 1]; ours is (B, H, W, 3)
+            r_chw = recon.permute(0, 3, 1, 2)
+            t_chw = target.permute(0, 3, 1, 2)
+            lp = self._lpips(r_chw, t_chw).mean()
+
+        total = l1 + self.kl_beta * kl + self.lpips_weight * lp
+        return total, {
+            "l1":    float(l1.detach()),
+            "kl":    float(kl.detach()),
+            "lpips": float(lp.detach()),
+        }

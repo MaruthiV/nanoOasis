@@ -29,13 +29,14 @@ data_vol = modal.Volume.from_name("nano-oasis-data", create_if_missing=True)
 
 
 TIERS = {
-    "smoke":    {"frames":    10_000, "workers":  4},
-    "baseline": {"frames":   500_000, "workers": 16},
-    "full":     {"frames": 5_000_000, "workers": 16},
+    # episode_size: max frames per shard -- caps per-worker peak memory at episode_size * 36 KB
+    "smoke":    {"frames":    10_000, "workers":  4, "episode_size":      0},   # 0 -> one shard / worker
+    "baseline": {"frames":   500_000, "workers": 16, "episode_size":      0},
+    "full":     {"frames": 5_000_000, "workers": 16, "episode_size": 25_000},   # 13 shards / worker, ~900 MB buffer each
 }
 
 
-@app.function(image=image, cpu=16, memory=32 * 1024,
+@app.function(image=image, cpu=16, memory=64 * 1024,
               volumes={"/data": data_vol}, timeout=3 * 3600, retries=0)
 def gen_remote(tier: str = "smoke") -> None:
     import multiprocessing as mp
@@ -50,10 +51,13 @@ def gen_remote(tier: str = "smoke") -> None:
     out.mkdir(parents=True, exist_ok=True)
 
     per = spec["frames"] // spec["workers"]
-    jobs = [(i, per, str(out), i * 100_000) for i in range(spec["workers"])]
-    print(f"collecting {spec['frames']} frames across {spec['workers']} workers -> /data/{tier}")
+    ep_size = spec["episode_size"]
+    jobs = [(i, per, str(out), i * 100_000, ep_size) for i in range(spec["workers"])]
+    print(f"collecting {spec['frames']} frames across {spec['workers']} workers -> /data/{tier} "
+          f"(episode_size={ep_size or 'one'} per shard)")
     with mp.Pool(spec["workers"]) as pool:
-        rows = pool.map(_worker, jobs)
+        worker_rows = pool.map(_worker, jobs)
+    rows = [r for ws in worker_rows for r in ws]
     write_index(rows, out / "index.parquet")
     data_vol.commit()
 

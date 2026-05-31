@@ -12,6 +12,7 @@ vae:
   latent_channels: 16
   kl_beta: 1.0e-6
   mlp_ratio: 4
+  lpips_weight: 0.0        # small tier was L1-only; flip to 0.5 if you want sharper sprites
 
 dit:
   hidden_dim: 256
@@ -24,7 +25,7 @@ dit:
   mlp_ratio: 4
 
 diffusion:
-  sigma_data: 0.5          # placeholder; V4 measures the real value on trained small-VAE latents
+  sigma_data: 2.29         # measured on val episodes 2026-05-31 using checkpoints/vae_small.pt (V4)
   sigma_min: 0.002
   sigma_max: 80.0
   rho: 7.0

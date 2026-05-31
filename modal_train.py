@@ -16,12 +16,15 @@ image = (
     .apt_install("ffmpeg")
     .pip_install(
         "torch>=2.5",
+        "torchvision",                     # required by lpips
         "numpy<2",
         "omegaconf>=2.3",
         "imageio[ffmpeg]",
         "zstandard>=0.22",
         "pyarrow",
         "tqdm",
+        "lpips",
+        "wandb",
     )
     # ship every project module the training functions transitively touch
     .add_local_python_source(
@@ -71,11 +74,13 @@ def train_vae_remote(config_name: str = "tiny", smoke: bool = False, steps: int 
     print("checkpoint committed to nano-oasis-ckpts volume")
 
 
-@app.function(image=image, gpu="A100-80GB", volumes=VOLS, timeout=24 * 3600)
-def train_vae_launch() -> None:
+@app.function(image=image, gpu="B200", volumes=VOLS, timeout=24 * 3600,
+              memory=300 * 1024,                           # 300 GB to hold the full episode cache in RAM
+              secrets=[modal.Secret.from_name("wandb")])
+def train_vae_launch(steps: int | None = None) -> None:
     _wire_paths_and_data()
     from train_vae import main
-    main(config_name="launch")
+    main(config_name="launch", total_steps=steps)
     ckpt_vol.commit()
 
 
@@ -116,7 +121,7 @@ def distill_lcm_remote(config_name: str = "launch") -> None:
 def main(stage: str = "vae", config: str = "tiny", smoke: bool = False, steps: int | None = None) -> None:
     if stage == "vae":
         if config == "launch":
-            train_vae_launch.remote()
+            train_vae_launch.remote(steps=steps)
         else:
             train_vae_remote.remote(config_name=config, smoke=smoke, steps=steps)
     elif stage == "dit":
