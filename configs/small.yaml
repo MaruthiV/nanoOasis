@@ -1,0 +1,52 @@
+# small tier: A100-80GB, baseline data (500K frames), trial/ablation tier between tiny and launch.
+# VAE d=256 (~7.3M), DiT d=256 depth=12 ctx=8 (~16M). Targets val L1 < 0.015 + horizon-2x > 100.
+
+seed: 0
+
+vae:
+  hidden_dim: 256          # 12 d^2 * (enc+dec) -> 12 * 256^2 * 9 ~ 7.1M params
+  enc_layers: 3
+  dec_layers: 6            # asymmetric: deeper decoder per literature
+  heads: 8                 # 256 / 8 = 32 head_dim
+  patch_size: 8
+  latent_channels: 16
+  kl_beta: 1.0e-6
+  mlp_ratio: 4
+
+dit:
+  hidden_dim: 256
+  depth: 12
+  heads: 8                 # head_dim = 32
+  head_dim: 32
+  patch_size: 2            # 48 spatial tok/frame
+  context_frames: 8        # double tiny -- longer temporal memory
+  num_actions: 6
+  mlp_ratio: 4
+
+diffusion:
+  sigma_data: 0.5          # placeholder; V4 measures the real value on trained small-VAE latents
+  sigma_min: 0.002
+  sigma_max: 80.0
+  rho: 7.0
+  p_mean: -0.4
+  p_std: 1.0
+  forcing: true
+  num_sample_steps: 16
+
+training:
+  device: auto
+  batch_size: 16           # 16 windows x 17 frames = 272 frames/step for VAE; A100 has headroom
+  lr: 1.0e-4
+  betas: [0.9, 0.95]
+  weight_decay: 0.0
+  warmup_steps: 1000
+  total_steps: 100000      # full small VAE; trial overrides via --steps
+  grad_clip: 1.0
+  ema_decay: 0.9999
+  log_every: 100
+  val_every: 2500
+  ckpt_every: 5000
+
+data:
+  index_path: data/baseline/index.parquet
+  cache_size: 64
