@@ -86,7 +86,8 @@ def train_vae_launch(steps: int | None = None) -> None:
 
 # ---- DiT: A100-80GB for tiny/small tiers, 4xH100 for the launch run ----
 
-@app.function(image=image, gpu="A100-80GB", volumes=VOLS, timeout=12 * 3600)
+@app.function(image=image, gpu="A100-80GB", volumes=VOLS, timeout=12 * 3600,
+              secrets=[modal.Secret.from_name("wandb")])
 def train_dit_remote(config_name: str = "tiny", smoke: bool = False, steps: int | None = None) -> None:
     _wire_paths_and_data()
     from train import main

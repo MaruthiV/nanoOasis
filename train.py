@@ -19,6 +19,23 @@ from diffusion import EDMDiffusion
 from data import EpisodeWindowDataset
 
 
+def _maybe_init_wandb(config_name: str, stage: str, cfg) -> object | None:
+    # Only init if WANDB_API_KEY is in the env (set via Modal Secret in cloud runs).
+    if not os.environ.get("WANDB_API_KEY"):
+        return None
+    try:
+        import wandb
+    except ImportError:
+        print("WANDB_API_KEY set but `wandb` not installed; skipping W&B logging.")
+        return None
+    return wandb.init(
+        project="nano-oasis",
+        name=f"{stage}-{config_name}",
+        config=OmegaConf.to_container(cfg, resolve=True),
+        save_code=False,
+    )
+
+
 def pick_device(spec: str) -> str:
     if spec != "auto":
         return spec
@@ -91,10 +108,18 @@ def main(stage: str = "dit", config_name: str = "tiny", total_steps: int | None 
     opt = torch.optim.AdamW(model.parameters(), lr=cfg.training.lr,
                             betas=tuple(cfg.training.betas), weight_decay=cfg.training.weight_decay)
     ema = EMA(model, decay=cfg.training.ema_decay)
+    wandb_run = _maybe_init_wandb(config_name, stage, cfg)
 
     ckpt_dir = pathlib.Path("checkpoints")
     ckpt_dir.mkdir(exist_ok=True)
     ckpt_path = ckpt_dir / f"dit_{config_name}.pt"
+
+    # sigma-bucket loss curve -- mandatory standing diagnostic (EXPERIMENTS.md). 10 log-spaced bins.
+    n_buckets = 10
+    bucket_edges = torch.logspace(math.log10(cfg.diffusion.sigma_min),
+                                  math.log10(cfg.diffusion.sigma_max), n_buckets + 1, device=device)
+    bucket_loss = torch.zeros(n_buckets, device=device)
+    bucket_cnt = torch.zeros(n_buckets, device=device)
 
     step = 0
     t0 = time.time()
@@ -124,12 +149,38 @@ def main(stage: str = "dit", config_name: str = "tiny", total_steps: int | None 
         if len(recent) > 100:
             recent.pop(0)
 
+        # bin this step's per-frame losses by sigma; reset each log window
+        b_idx = (torch.bucketize(info["sigma_flat"], bucket_edges) - 1).clamp(0, n_buckets - 1)
+        bucket_loss.scatter_add_(0, b_idx, info["loss_flat"])
+        bucket_cnt.scatter_add_(0, b_idx, torch.ones_like(info["loss_flat"]))
+
         if step % cfg.training.log_every == 0:
             mean = sum(recent) / len(recent)
             elapsed = time.time() - t0
             sps = (step + 1) / max(elapsed, 1e-6)
             print(f"step {step:5d}  loss {mean:.4f}  σ̄ {info['sigma_mean']:.3f}  "
                   f"lr {lr:.2e}  {sps:.1f} steps/s  {elapsed:.0f}s")
+            if wandb_run is not None:
+                wandb_run.log({
+                    "train/loss":        loss.item(),
+                    "train/loss_smooth": mean,
+                    "train/sigma_mean":  info["sigma_mean"],
+                    "train/lr":          lr,
+                    "throughput/steps_per_s": sps,
+                    "time/elapsed_s":    elapsed,
+                }, step=step)
+
+            # sigma-bucket loss curve over the last log window, then reset
+            occ = bucket_cnt > 0
+            bucket_mean = bucket_loss / bucket_cnt.clamp(min=1)            # 0 where empty
+            curve = " ".join(f"{m:.2f}" if o else "·"
+                             for m, o in zip(bucket_mean.tolist(), occ.tolist()))
+            print(f"  sigma-buckets [{cfg.diffusion.sigma_min:.3f}..{cfg.diffusion.sigma_max:.0f}]: {curve}")
+            if wandb_run is not None:
+                wandb_run.log({f"sigma_bucket/b{i}": bucket_mean[i].item()
+                               for i in range(n_buckets) if occ[i]}, step=step)
+            bucket_loss.zero_()
+            bucket_cnt.zero_()
 
         if step > 0 and step % cfg.training.ckpt_every == 0:
             torch.save({"model": model.state_dict(), "ema": ema.shadow, "step": step,
@@ -142,6 +193,9 @@ def main(stage: str = "dit", config_name: str = "tiny", total_steps: int | None 
     final = sum(recent) / max(1, len(recent))
     print(f"done. {step} steps, {elapsed:.0f}s, {step/elapsed:.1f} steps/s. "
           f"final loss {final:.4f}. saved {ckpt_path}")
+    if wandb_run is not None:
+        wandb_run.summary["final_loss"] = final
+        wandb_run.finish()
 
 
 if __name__ == "__main__":

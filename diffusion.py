@@ -57,8 +57,12 @@ class EDMDiffusion(nn.Module):
         # EDM loss weighting -- equal-norm contribution across noise levels
         w = (sigma * sigma + self.sigma_data ** 2) / (sigma * self.sigma_data) ** 2
         per_elem = (D - x_clean) ** 2
-        loss = (_bcast(w) * per_elem).mean()
+        weighted = _bcast(w) * per_elem
+        loss = weighted.mean()
+        per_frame = weighted.mean(dim=(2, 3, 4))                          # (B, T) -- for the sigma-bucket diagnostic
         return loss, {
             "sigma_mean": float(sigma.mean().detach()),
             "sigma_std":  float(sigma.std().detach()),
+            "sigma_flat": sigma.detach().flatten(),                       # (B*T,)
+            "loss_flat":  per_frame.detach().flatten(),                   # (B*T,) weighted per-frame loss
         }

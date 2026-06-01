@@ -18,6 +18,11 @@ from vae import VAE
 from data import EpisodeWindowDataset
 
 
+def _strip_lpips(state_dict: dict) -> dict:
+    # B001: LPIPS VGG weights register as a child module and get saved (~80 MB).
+    return {k: v for k, v in state_dict.items() if not k.startswith("_lpips.")}
+
+
 def _maybe_init_wandb(config_name: str, cfg) -> object | None:
     # Only init if WANDB_API_KEY is in the env (set via Modal Secret in cloud runs).
     if not os.environ.get("WANDB_API_KEY"):
@@ -127,12 +132,12 @@ def main(config_name: str = "tiny", total_steps: int | None = None) -> None:
                 }, step=step)
 
         if step > 0 and step % cfg.training.ckpt_every == 0:
-            torch.save({"model": model.state_dict(), "step": step,
+            torch.save({"model": _strip_lpips(model.state_dict()), "step": step,
                         "config": OmegaConf.to_container(cfg)}, ckpt_path)
 
         step += 1
 
-    torch.save({"model": model.state_dict(), "step": step,
+    torch.save({"model": _strip_lpips(model.state_dict()), "step": step,
                 "config": OmegaConf.to_container(cfg)}, ckpt_path)
     elapsed = time.time() - t0
     final_l1 = sum(recent_l1) / max(1, len(recent_l1))
