@@ -73,7 +73,7 @@ def decode_latent(vae: VAE, z: torch.Tensor) -> np.ndarray:
 
 @torch.no_grad()
 def initial_context(vae: VAE, T_ctx: int, seed: int, device: str):
-    g = Game(seed=seed, biome="grass")
+    g = Game(seed=seed, palette="classic")
     frames = [g.step(0)[0].copy() for _ in range(T_ctx)]
     flat = torch.from_numpy(np.stack(frames)).to(device)
     mu, _ = vae.encode(flat)
@@ -109,7 +109,7 @@ def headless(ckpt_path, vae_path, config_name, n_frames, num_steps, sigma_stab, 
 
     out_dir = pathlib.Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    cycle = [0, 2, 2, 2, 5, 5, 1, 1, 0, 3, 3, 3]
+    cycle = [2, 2, 2, 2, 1, 1, 1, 1]                # sweep the paddle right then left (Breakout)
     frames_out: list[np.ndarray] = []
     for i in range(n_frames):
         action = cycle[i % len(cycle)]
@@ -129,6 +129,80 @@ def headless(ckpt_path, vae_path, config_name, n_frames, num_steps, sigma_stab, 
              for i in range(1, len(frames_out))]
     print(f"wrote {n_frames} frames + strip.png to {out_dir}")
     print(f"mean abs frame-to-frame delta: {sum(diffs)/len(diffs):.2f}/255 (>0 => model is producing change)")
+
+
+@torch.no_grad()
+def measure_horizon(ckpt_path, vae_path, config_name, n_frames, num_steps, sigma_stab, seed, out_dir):
+    # autoregressive horizon-2x: roll the model and the real game in lockstep on the same actions,
+    # report the t where pixel MSE vs ground truth first exceeds 2x the single-step floor.
+    import imageio.v3 as iio
+    device = pick_device("auto")
+    cfg, vae, diff = load_models(ckpt_path, vae_path, config_name, device)
+    T_ctx = cfg.dit.context_frames
+    torch.manual_seed(seed)
+
+    # ground truth: T_ctx context frames (action 0, matching initial_context), then a fixed action sequence
+    g = Game(seed=seed, palette="classic")
+    gt = [g.step(0)[0].copy() for _ in range(T_ctx)]
+    cycle = [2, 2, 2, 2, 1, 1, 1, 1]                # sweep the paddle right then left (Breakout)
+    action_seq = [cycle[i % len(cycle)] for i in range(n_frames)]
+    for a in action_seq:
+        gt.append(g.step(a)[0].copy())
+
+    flat = torch.from_numpy(np.stack(gt[:T_ctx])).to(device)
+    mu, _ = vae.encode(flat)
+    z_history = mu.view(T_ctx, vae.Hp, vae.Wp, vae.latent_channels).permute(0, 3, 1, 2).contiguous().unsqueeze(0)
+    actions = [0] * T_ctx
+    sigmas = edm_sigma_schedule(num_steps, cfg.diffusion.sigma_min, cfg.diffusion.sigma_max, device=device)
+
+    mses, pairs = [], []
+    for t, a in enumerate(action_seq):
+        z_ctx = z_history[:, 1:]
+        full_actions = torch.tensor(actions[1:] + [a], dtype=torch.long, device=device)
+        new_lat = sample_next_frame(diff, z_ctx, full_actions, sigmas, sigma_stab)
+        z_history = torch.cat([z_ctx, new_lat], dim=1)
+        actions = actions[1:] + [a]
+        m = decode_latent(vae, new_lat)
+        truth = gt[T_ctx + t]
+        mses.append(float(np.mean((m.astype(np.float32) - truth.astype(np.float32)) ** 2)))
+        pairs.append(np.concatenate([truth, m], axis=0))                # truth on top, model below
+
+    floor = mses[0]
+    horizon = next((t for t, mse in enumerate(mses) if mse > 2 * floor), n_frames)
+    out_dir = pathlib.Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    iio.imwrite(out_dir / "horizon_strip.png", np.concatenate(pairs[:16], axis=1))
+    print(f"single-step floor (pixel MSE): {floor:.1f}")
+    print(f"horizon-2x: {horizon}/{n_frames} frames (first t where pixel MSE vs ground truth > 2x floor)")
+    print("MSE trace: " + " ".join(f"{m:.0f}" for m in mses[:24]))
+
+
+@torch.no_grad()
+def action_test(ckpt_path, vae_path, config_name, num_steps, sigma_stab, seed, out_dir):
+    # same context + same sampler noise, vary only the action -> isolates how much the model reacts to input
+    import imageio.v3 as iio
+    device = pick_device("auto")
+    cfg, vae, diff = load_models(ckpt_path, vae_path, config_name, device)
+    T_ctx = cfg.dit.context_frames
+    z_history, actions = initial_context(vae, T_ctx, seed, device)
+    z_ctx = z_history[:, 1:]
+    sigmas = edm_sigma_schedule(num_steps, cfg.diffusion.sigma_min, cfg.diffusion.sigma_max, device=device)
+
+    names = ["NONE", "LEFT", "RIGHT"]
+    frames = []
+    for a in range(3):
+        torch.manual_seed(seed)                                          # identical noise across actions
+        full_actions = torch.tensor(actions[1:] + [a], dtype=torch.long, device=device)
+        new_lat = sample_next_frame(diff, z_ctx, full_actions, sigmas, sigma_stab)
+        frames.append(decode_latent(vae, new_lat))
+    none = frames[0].astype(np.float32)
+    print("action response (same context + same noise, vary action):")
+    for a in range(3):
+        d = float(np.abs(frames[a].astype(np.float32) - none).mean())
+        print(f"  {a} {names[a]:11s} mean |delta| vs NONE = {d:.2f}/255")
+    out_dir = pathlib.Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    iio.imwrite(out_dir / "action_test.png", np.concatenate(frames, axis=1))
 
 
 def play(ckpt_path, vae_path, config_name, num_steps, sigma_stab, seed):
@@ -180,10 +254,17 @@ if __name__ == "__main__":
     p.add_argument("--sigma-stab", type=float, default=0.1)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--headless", type=int, default=0, help="write N frames + strip.png, no window")
+    p.add_argument("--measure-horizon", type=int, default=0, help="horizon-2x over N frames vs the real game")
+    p.add_argument("--action-test", action="store_true", help="action-response delta from a fixed context")
     p.add_argument("--out", type=str, default="assets/infer_smoke")
     args = p.parse_args()
 
-    if args.headless > 0:
+    if args.action_test:
+        action_test(args.ckpt, args.vae, args.config, args.steps, args.sigma_stab, args.seed, args.out)
+    elif args.measure_horizon > 0:
+        measure_horizon(args.ckpt, args.vae, args.config, args.measure_horizon,
+                        args.steps, args.sigma_stab, args.seed, args.out)
+    elif args.headless > 0:
         headless(args.ckpt, args.vae, args.config, args.headless,
                  args.steps, args.sigma_stab, args.seed, args.out)
     else:

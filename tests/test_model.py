@@ -28,7 +28,7 @@ def test_dit_shapes_and_init():
     B, T = 2, 4
     x = torch.randn(B, T, 16, 12, 16)
     sigma = torch.randn(B, T)
-    action = torch.randint(0, 6, (B, T))
+    action = torch.randint(0, 3, (B, T))
     out = m(x, sigma, action)
     assert out.shape == x.shape
 
@@ -66,7 +66,7 @@ def test_diffusion_forcing_denoise_output_shape_matches_input():
     B, T = 2, 4
     x = torch.randn(B, T, 16, 12, 16)
     sigma = torch.full((B, T), 1.0)
-    action = torch.randint(0, 6, (B, T))
+    action = torch.randint(0, 3, (B, T))
     D = diff.denoise(x, sigma, action)
     assert D.shape == x.shape
 
@@ -76,7 +76,7 @@ def test_diffusion_forcing_c_shape_is_per_frame_not_per_window():
     m = DiT(_tiny_cfg())
     B, T = 2, 4
     sigma = torch.randn(B, T)
-    action = torch.randint(0, 6, (B, T))
+    action = torch.randint(0, 3, (B, T))
     c = m.time_emb(sigma) + m.action_emb(action)
     assert c.shape == (B, T, m.d), f"c.shape={c.shape}; expected (B={B}, T={T}, d={m.d})"
 
@@ -84,7 +84,7 @@ def test_diffusion_forcing_c_shape_is_per_frame_not_per_window():
 def test_diffusion_forcing_loss_runs_and_backprops():
     diff = _tiny_diff()
     x = torch.randn(2, 4, 16, 12, 16)
-    action = torch.randint(0, 6, (2, 4))
+    action = torch.randint(0, 3, (2, 4))
     loss, info = diff.loss(x, action)
     loss.backward()
     assert torch.isfinite(loss)

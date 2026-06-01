@@ -64,7 +64,7 @@ def test_writer_deterministic_for_same_seed(tmp_path):
 def test_bot_random_histogram_within_5pct():
     bot = RandomBot(np.random.default_rng(0))
     actions = np.fromiter((bot.act(None) for _ in range(5000)), dtype=np.uint8, count=5000)
-    hist = np.bincount(actions, minlength=6) / 5000
+    hist = np.bincount(actions, minlength=3) / 5000
     diff = np.abs(hist - RandomBot.PROBS).max()
     assert diff < 0.05, (hist.tolist(), RandomBot.PROBS.tolist(), float(diff))
 
@@ -86,32 +86,35 @@ def test_bot_random_stickiness_at_least_3():
     assert interior and min(interior) >= 3, runs[:20]
 
 
-# ---- D4: heuristic bot ----
+# ---- D4: heuristic bot tracks the ball ----
 
 
-def _completion_rate(bot_cls, n_levels=30, max_frames=2000) -> float:
-    completed = 0
-    for seed in range(n_levels):
+def _play(bot_cls, seeds, frames=1500):
+    score = misses = 0
+    for seed in seeds:
         g = Game(seed=seed)
         bot = bot_cls(np.random.default_rng(seed ^ 0xB07))
-        initial = g.level.seed
-        for _ in range(max_frames):
+        for _ in range(frames):
             g.step(bot.act(g))
-            if g.level.seed != initial:
-                completed += 1
-                break
-    return completed / n_levels
+        score += g.score
+        misses += g.misses
+    return score, misses
 
 
-def test_bot_heuristic_completes_at_least_30pct():
-    rate = _completion_rate(HeuristicBot, n_levels=30, max_frames=2000)
-    assert rate >= 0.30, f"heuristic completion rate {rate:.0%}"
+def test_bot_heuristic_tracks_ball_direction():
+    bot = HeuristicBot(np.random.default_rng(99))
+    g = Game(seed=0)
+    g.paddle_x = 52.0                                  # paddle center ~64
+    g.ball.x = 110.0                                   # ball far to the right
+    assert sum(bot.act(g) == 2 for _ in range(200)) > 150   # tracks right (allowing the 10% random)
+    g.ball.x = 6.0                                     # ball far to the left
+    assert sum(bot.act(g) == 1 for _ in range(200)) > 150
 
 
-def test_bot_heuristic_beats_random_at_completion():
-    h = _completion_rate(HeuristicBot, n_levels=30, max_frames=1500)
-    r = _completion_rate(RandomBot, n_levels=30, max_frames=1500)
-    assert h > r, f"heuristic={h:.0%} random={r:.0%}"
+def test_bot_heuristic_loses_fewer_balls_than_random():
+    _, hm = _play(HeuristicBot, range(8))
+    _, rm = _play(RandomBot, range(8))
+    assert hm < rm, f"heuristic misses {hm} vs random {rm}"
 
 
 # ---- D5: parallel collection + parquet index ----

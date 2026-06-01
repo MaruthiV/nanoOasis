@@ -13,12 +13,12 @@ import pathlib
 import numpy as np
 import zstandard as zstd
 
-from game import Game, H, W, PLAYER_H
+from game import Game, H, W, PADDLE_W, BALL_SIZE
 
 
 class RandomBot:
-    # action prior from PROJECT.md §3.11 -- {NONE, L, R, J, LJ, RJ}
-    PROBS = np.array([0.10, 0.20, 0.20, 0.15, 0.175, 0.175])
+    # action prior -- {NONE, LEFT, RIGHT}; paddle mostly moving so some rallies survive by luck
+    PROBS = np.array([0.2, 0.4, 0.4])
 
     def __init__(self, rng: np.random.Generator):
         self.rng = rng
@@ -27,53 +27,29 @@ class RandomBot:
 
     def act(self, game: Game) -> int:                # game unused; HeuristicBot reads it
         if self.held_remaining == 0:
-            self.current = int(self.rng.choice(6, p=self.PROBS))
+            self.current = int(self.rng.choice(3, p=self.PROBS))
             self.held_remaining = int(self.rng.integers(3, 9))   # 3..8 inclusive
         self.held_remaining -= 1
         return self.current
 
 
 class HeuristicBot:
-    """Walk toward the door, jump on enemies or when the door is above."""
+    """Track the ball: nudge the paddle so its center sits under the ball."""
 
     def __init__(self, rng: np.random.Generator):
         self.rng = rng
-        self.held = 0
-        self.current = 2                         # RIGHT default
 
     def act(self, g: Game) -> int:
-        if self.held > 0:
-            self.held -= 1
-            return self.current
-
-        # occasional distraction jump -- helps escape platform dead-ends
-        if self.rng.random() < 0.08:
-            self.current = int(self.rng.choice([3, 4, 5]))
-            self.held = int(self.rng.integers(2, 6))
-            return self.current
-
-        p = g.player
-        door_x, door_y = g.level.door
-        going_right = door_x >= p.x
-        # door's bottom (door_y) above the player's head (p.y - PLAYER_H) -> need altitude
-        door_above = door_y < p.y - PLAYER_H
-
-        # enemy within ~3 tiles horizontally and roughly the player's vertical band
-        ptop = p.y - PLAYER_H
-        enemy_ahead = any(
-            (e.x - p.x) * (1 if going_right else -1) < 24
-            and (e.x - p.x) * (1 if going_right else -1) > -8
-            and abs(e.y - ptop) < 16
-            for e in g.level.enemies
-        )
-
-        if enemy_ahead or door_above:
-            self.current = 5 if going_right else 4
-        else:
-            self.current = 2 if going_right else 1
-
-        self.held = int(self.rng.integers(3, 7))          # 3..6
-        return self.current
+        # occasional random move covers off-ball paddle positions for the model to learn from
+        if self.rng.random() < 0.1:
+            return int(self.rng.integers(0, 3))
+        paddle_c = g.paddle_x + PADDLE_W / 2
+        ball_c = g.ball.x + BALL_SIZE / 2
+        if ball_c < paddle_c - 2:
+            return 1
+        if ball_c > paddle_c + 2:
+            return 2
+        return 0
 
 
 def collect_episode(seed: int, n_frames: int, bot_cls=RandomBot
@@ -87,13 +63,12 @@ def collect_episode(seed: int, n_frames: int, bot_cls=RandomBot
 
     for t in range(n_frames):
         action = bot.act(g)
-        prev_deaths = g.deaths
-        prev_level_seed = g.level.seed
+        prev_misses, prev_board, prev_games = g.misses, g.board, g.games
         frame, _, _ = g.step(action)
         frames[t] = frame
         actions[t] = action
-        level_seeds[t] = g.level.seed
-        dones[t] = g.deaths > prev_deaths or g.level.seed != prev_level_seed
+        level_seeds[t] = g.games                       # game id in the level_seeds slot
+        dones[t] = g.misses > prev_misses or g.board != prev_board or g.games != prev_games
 
     return frames, actions, dones, level_seeds
 

@@ -21,7 +21,7 @@ dit:
   head_dim: 32
   patch_size: 2            # 48 spatial tok/frame
   context_frames: 8        # double tiny -- longer temporal memory
-  num_actions: 6
+  num_actions: 3          # NONE/LEFT/RIGHT (Breakout, D018)
   mlp_ratio: 4
 
 diffusion:
