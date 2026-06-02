@@ -23,11 +23,14 @@ class EDMDiffusion(nn.Module):
         self.sigma_max = float(cfg.sigma_max)
         self.p_mean = float(cfg.p_mean)
         self.p_std = float(cfg.p_std)
+        self.forcing = bool(cfg.get("forcing", True))   # D002; False = one shared sigma per window (M2 ablation)
 
     def sample_sigma(self, B: int, T: int, device) -> torch.Tensor:
-        # log-σ ~ N(P_mean, P_std). Per-frame (B, T) -- Diffusion Forcing D002.
-        log_sigma = self.p_mean + self.p_std * torch.randn(B, T, device=device)
-        return log_sigma.exp().clamp(self.sigma_min, self.sigma_max)
+        # log-σ ~ N(P_mean, P_std). Diffusion Forcing (D002): per-frame (B, T).
+        # forcing=False -> sample one σ per window and share it across frames (flat-σ, M2 ablation).
+        log_sigma = self.p_mean + self.p_std * torch.randn(B, T if self.forcing else 1, device=device)
+        sigma = log_sigma.exp().clamp(self.sigma_min, self.sigma_max)
+        return sigma if self.forcing else sigma.expand(B, T)
 
     def precond(self, sigma: torch.Tensor):
         # Karras EDM Table 1. sigma: (B, T) -> 4x (B, T)

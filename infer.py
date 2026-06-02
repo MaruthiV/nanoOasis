@@ -14,7 +14,8 @@ from omegaconf import OmegaConf
 from vae import VAE
 from model import DiT
 from diffusion import EDMDiffusion
-from game import Game, _keys_to_action, W, H
+from game import (Game, _keys_to_action, W, H, PALETTE, DB16,
+                  BRICK_TOP, BRICK_H, BRICK_W, BRICK_ROWS, BRICK_COLS, BALL_SPEED)
 
 
 def pick_device(spec: str) -> str:
@@ -205,6 +206,71 @@ def action_test(ckpt_path, vae_path, config_name, num_steps, sigma_stab, seed, o
     iio.imwrite(out_dir / "action_test.png", np.concatenate(frames, axis=1))
 
 
+@torch.no_grad()
+def plausibility(ckpt_path, vae_path, config_name, n_frames, num_steps, sigma_stab, seed, out_dir):
+    # reference-free Breakout plausibility -- the right metric for a chaotic ball (no ground-truth needed).
+    # reads ball + brick state out of the GENERATED pixels and checks the model obeys the game's rules.
+    import imageio.v3 as iio
+    device = pick_device("auto")
+    cfg, vae, diff = load_models(ckpt_path, vae_path, config_name, device)
+    T_ctx = cfg.dit.context_frames
+    torch.manual_seed(seed)
+
+    pal = PALETTE["classic"]
+    bg = np.array(DB16[pal["bg"]], dtype=int)
+    row_colors = [np.array(DB16[i], dtype=int) for i in pal["rows"]]
+
+    def detect_ball(f):
+        m = (f[:, :, 0] > 200) & (f[:, :, 1] > 200) & (f[:, :, 2] > 200)
+        m[:8, :] = False                                    # drop the top HUD + lives strip
+        ys, xs = np.where(m)
+        return (float(xs.mean()), float(ys.mean())) if len(xs) else None
+
+    def brick_grid(f):
+        g = np.zeros((BRICK_ROWS, BRICK_COLS), dtype=bool)
+        for r in range(BRICK_ROWS):
+            cy = BRICK_TOP + r * BRICK_H + BRICK_H // 2
+            for c in range(BRICK_COLS):
+                px = f[cy, c * BRICK_W + BRICK_W // 2].astype(int)
+                g[r, c] = np.abs(px - row_colors[r]).sum() < np.abs(px - bg).sum()
+        return g
+
+    z_history, actions = initial_context(vae, T_ctx, seed, device)
+    sigmas = edm_sigma_schedule(num_steps, cfg.diffusion.sigma_min, cfg.diffusion.sigma_max, device=device)
+    cycle = [2, 2, 2, 2, 1, 1, 1, 1]
+    balls, grids, frames = [], [], []
+    for t in range(n_frames):
+        a = cycle[t % len(cycle)]
+        z_ctx = z_history[:, 1:]
+        full_actions = torch.tensor(actions[1:] + [a], dtype=torch.long, device=device)
+        new_lat = sample_next_frame(diff, z_ctx, full_actions, sigmas, sigma_stab)
+        z_history = torch.cat([z_ctx, new_lat], dim=1)
+        actions = actions[1:] + [a]
+        f = decode_latent(vae, new_lat)
+        frames.append(f)
+        balls.append(detect_ball(f))
+        grids.append(brick_grid(f))
+
+    ball_rate = sum(b is not None for b in balls) / n_frames
+    speeds = [((balls[i][0] - balls[i - 1][0]) ** 2 + (balls[i][1] - balls[i - 1][1]) ** 2) ** 0.5
+              for i in range(1, n_frames) if balls[i] and balls[i - 1]]
+    play_speeds = [s for s in speeds if s < 4 * BALL_SPEED]      # drop relaunch teleports
+    mean_speed = float(np.mean(play_speeds)) if play_speeds else 0.0
+    speed_cv = float(np.std(play_speeds) / (mean_speed + 1e-6)) if play_speeds else 0.0
+    counts = [int(g.sum()) for g in grids]
+    resurrections = sum(int((grids[i] & ~grids[i - 1]).sum())
+                        for i in range(1, n_frames) if counts[i] - counts[i - 1] <= BRICK_COLS)
+
+    print(f"ball detected:        {ball_rate * 100:.0f}% of frames")
+    print(f"mean ball speed:      {mean_speed:.2f} px/frame  (real game = {BALL_SPEED})")
+    print(f"ball speed variation: {speed_cv:.2f}  (low = constant speed / plausible physics)")
+    print(f"bricks:               {counts[0]} -> {counts[-1]}  (broken over the rollout)")
+    print(f"brick resurrections:  {resurrections}  (cells refilling without a reset; 0 = good world-state memory)")
+    out_dir = pathlib.Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    iio.imwrite(out_dir / "plausibility_strip.png", np.concatenate(frames[:16], axis=1))
+
+
 def play(ckpt_path, vae_path, config_name, num_steps, sigma_stab, seed):
     import pygame
     device = pick_device("auto")
@@ -254,12 +320,16 @@ if __name__ == "__main__":
     p.add_argument("--sigma-stab", type=float, default=0.1)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--headless", type=int, default=0, help="write N frames + strip.png, no window")
-    p.add_argument("--measure-horizon", type=int, default=0, help="horizon-2x over N frames vs the real game")
+    p.add_argument("--measure-horizon", type=int, default=0, help="short-horizon exact-MSE drift vs the real game")
     p.add_argument("--action-test", action="store_true", help="action-response delta from a fixed context")
+    p.add_argument("--plausibility", type=int, default=0, help="reference-free Breakout plausibility over N frames")
     p.add_argument("--out", type=str, default="assets/infer_smoke")
     args = p.parse_args()
 
-    if args.action_test:
+    if args.plausibility > 0:
+        plausibility(args.ckpt, args.vae, args.config, args.plausibility,
+                     args.steps, args.sigma_stab, args.seed, args.out)
+    elif args.action_test:
         action_test(args.ckpt, args.vae, args.config, args.steps, args.sigma_stab, args.seed, args.out)
     elif args.measure_horizon > 0:
         measure_horizon(args.ckpt, args.vae, args.config, args.measure_horizon,

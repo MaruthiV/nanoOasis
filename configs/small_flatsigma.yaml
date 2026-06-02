@@ -1,0 +1,55 @@
+# M2 ablation, arm B: flat-sigma per window (forcing=false) vs small.yaml's per-frame Diffusion Forcing.
+# Identical to small.yaml except diffusion.forcing; shares the small VAE via vae_ckpt (DiT only, VAE is frozen).
+
+seed: 0
+
+vae:
+  hidden_dim: 256
+  enc_layers: 3
+  dec_layers: 6
+  heads: 8
+  patch_size: 8
+  latent_channels: 16
+  kl_beta: 1.0e-6
+  mlp_ratio: 4
+  lpips_weight: 0.5
+
+vae_ckpt: checkpoints/vae_small.pt   # share the small VAE; the only diff vs `small` is diffusion.forcing
+
+dit:
+  hidden_dim: 256
+  depth: 12
+  heads: 8
+  head_dim: 32
+  patch_size: 2
+  context_frames: 8
+  num_actions: 3
+  mlp_ratio: 4
+
+diffusion:
+  sigma_data: 2.23         # LPIPS vae_small (2026-06-01); L1 vae was 1.96
+  sigma_min: 0.002
+  sigma_max: 80.0
+  rho: 7.0
+  p_mean: -0.4
+  p_std: 1.0
+  forcing: false           # arm B: one shared sigma per window (vs small.yaml's per-frame Diffusion Forcing)
+  num_sample_steps: 16
+
+training:
+  device: auto
+  batch_size: 16
+  lr: 1.0e-4
+  betas: [0.9, 0.95]
+  weight_decay: 0.0
+  warmup_steps: 1000
+  total_steps: 100000
+  grad_clip: 1.0
+  ema_decay: 0.9999
+  log_every: 100
+  val_every: 2500
+  ckpt_every: 5000
+
+data:
+  index_path: data/baseline/index.parquet
+  cache_size: 64

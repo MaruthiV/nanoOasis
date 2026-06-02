@@ -94,7 +94,8 @@ def main(stage: str = "dit", config_name: str = "tiny", total_steps: int | None 
     loader = DataLoader(ds, batch_size=cfg.training.batch_size, num_workers=0)
 
     # frozen VAE
-    vae_ckpt = torch.load(f"checkpoints/vae_{config_name}.pt", weights_only=False, map_location=device)
+    vae_ckpt_path = cfg.get("vae_ckpt", f"checkpoints/vae_{config_name}.pt")   # ablation configs share one VAE
+    vae_ckpt = torch.load(vae_ckpt_path, weights_only=False, map_location=device)
     vae = VAE(cfg.vae).to(device).eval()
     vae.load_state_dict(vae_ckpt["model"])
     for p in vae.parameters():
