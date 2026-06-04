@@ -8,7 +8,7 @@ import zstandard as zstd
 from data_gen import collect_episode, write_shard, RandomBot, HeuristicBot, _worker, write_index
 from data import EpisodeWindowDataset, WINDOW
 
-from game import Game
+from game import Game, W, H
 
 SMOKE_INDEX = pathlib.Path(__file__).resolve().parent.parent / "data" / "smoke" / "index.parquet"
 
@@ -24,7 +24,7 @@ def test_writer_round_trip_shapes_and_dtypes(tmp_path):
     write_shard(shard, frames, actions, dones, level_seeds)
 
     data = _read_shard(shard)
-    assert data["frames"].shape       == (50, 96, 128, 3)
+    assert data["frames"].shape       == (50, H, W, 3)
     assert data["frames"].dtype       == np.uint8
     assert data["actions"].shape      == (50,)
     assert data["actions"].dtype      == np.uint8
@@ -154,7 +154,7 @@ def test_loader_pulls_100_windows_with_correct_shapes():
     it = iter(ds)
     for _ in range(100):
         frames, actions = next(it)
-        assert frames.shape == (WINDOW, 96, 128, 3)
+        assert frames.shape == (WINDOW, H, W, 3)
         assert frames.dtype == np.uint8
         assert actions.shape == (WINDOW,)
         assert actions.dtype == np.uint8

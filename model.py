@@ -6,6 +6,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from game import H as GAME_H, W as GAME_W
+
 
 # ---- RoPE ----
 
@@ -101,26 +103,27 @@ class Block(nn.Module):
             nn.Linear(dim * mlp_ratio, dim),
         )
 
-    def _attn(self, x, qkv_proj, out_proj, rope, causal: bool):
+    def _attn(self, x, qkv_proj, out_proj, rope, causal: bool, n_skip: int = 0):
+        # n_skip leading tokens get NO RoPE -- the prepended action token in token-concat mode (M4)
         B, n, d = x.shape
         H, D = self.heads, self.head_dim
         q, k, v = qkv_proj(x).view(B, n, 3, H, D).permute(2, 0, 3, 1, 4).unbind(0)
-        if len(rope) == 2:
-            q = apply_rope_1d(q, *rope)
-            k = apply_rope_1d(k, *rope)
+        rope_fn = apply_rope_1d if len(rope) == 2 else apply_rope_2d
+        if n_skip:
+            q = torch.cat([q[:, :, :n_skip], rope_fn(q[:, :, n_skip:], *rope)], dim=2)
+            k = torch.cat([k[:, :, :n_skip], rope_fn(k[:, :, n_skip:], *rope)], dim=2)
         else:
-            q = apply_rope_2d(q, *rope)
-            k = apply_rope_2d(k, *rope)
+            q, k = rope_fn(q, *rope), rope_fn(k, *rope)
         out = F.scaled_dot_product_attention(q, k, v, is_causal=causal)
         return out_proj(out.transpose(1, 2).reshape(B, n, d))
 
-    def forward(self, x, mods, sp_rope, tp_rope):
+    def forward(self, x, mods, sp_rope, tp_rope, sp_n_skip: int = 0):
         g1, b1, a1, g2, b2, a2, g3, b3, a3 = mods
         B, T, n, d = x.shape
 
-        # spatial attention -- per-frame, full self-attn
+        # spatial attention -- per-frame, full self-attn (sp_n_skip skips RoPE on a prepended action token)
         h = self.ln_s(x) * (1 + g1.unsqueeze(2)) + b1.unsqueeze(2)
-        h_attn = self._attn(h.view(B * T, n, d), self.qkv_s, self.proj_s, sp_rope, causal=False)
+        h_attn = self._attn(h.view(B * T, n, d), self.qkv_s, self.proj_s, sp_rope, causal=False, n_skip=sp_n_skip)
         x = x + a1.unsqueeze(2) * h_attn.view(B, T, n, d)
 
         # temporal attention -- per-spatial-position, causal across frames
@@ -136,8 +139,10 @@ class Block(nn.Module):
 
 # ---- DiT ----
 
-# latent grid produced by the VAE -- C channels, H rows, W cols. PROJECT.md §2.2.
-LATENT_C, LATENT_H, LATENT_W = 16, 12, 16
+# latent grid the VAE produces -- C channels, (H/8) rows, (W/8) cols. VAE patch is 8 (D009);
+# deriving from the game resolution makes the DiT auto-scale with it (D021: 128x96 -> 256x192).
+LATENT_C, VAE_PATCH = 16, 8
+LATENT_H, LATENT_W = GAME_H // VAE_PATCH, GAME_W // VAE_PATCH
 
 
 class DiT(nn.Module):
@@ -151,6 +156,7 @@ class DiT(nn.Module):
         self.patch = cfg.patch_size
         self.context_frames = cfg.context_frames
         self.num_actions = cfg.num_actions
+        self.action_mode = str(cfg.get("action_mode", "add"))   # M4; "concat" = action as a token, not into c
 
         self.latent_C = LATENT_C
         self.h = LATENT_H // self.patch
@@ -190,14 +196,22 @@ class DiT(nn.Module):
         # (EDM passes c_noise = 0.25·log σ here, not raw σ); action: (B, T) ints
         B, T = x.shape[:2]
         h = self.in_proj(patchify(x, self.patch))                    # (B, T, n_spat, d)
-        c = self.time_emb(t) + self.action_emb(action)               # (B, T, d) -- D005
+        if self.action_mode == "concat":
+            c = self.time_emb(t)                                     # action enters as a token, not into c (M4)
+            h = torch.cat([self.action_emb(action).unsqueeze(2), h], dim=2)   # (B, T, n_spat+1, d)
+            sp_n_skip = 1
+        else:
+            c = self.time_emb(t) + self.action_emb(action)           # (B, T, d) -- AdaLN-add, D005
+            sp_n_skip = 0
         shared = self.adaln_mod(F.silu(c)).view(B, T, 9, self.d)     # (B, T, 9, d)
 
         sp_rope = (self.row_cos, self.row_sin, self.col_cos, self.col_sin)
         tp_rope = (self.time_cos, self.time_sin)
         for i, blk in enumerate(self.blocks):
             mods = (shared + self.adaln_block_bias[i][None, None]).unbind(dim=2)
-            h = blk(h, mods, sp_rope, tp_rope)
+            h = blk(h, mods, sp_rope, tp_rope, sp_n_skip)
 
+        if self.action_mode == "concat":
+            h = h[:, :, 1:, :]                                       # strip the action token
         out = self.out_proj(self.final_norm(h))                      # (B, T, n_spat, pix)
         return unpatchify(out, self.h, self.w, self.patch, self.latent_C)

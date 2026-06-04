@@ -3,7 +3,7 @@ import hashlib
 import numpy as np
 
 from game import (
-    Game, W, H, NUM_ACTIONS,
+    Game, SCALE, W, H, NUM_ACTIONS,
     PADDLE_W, PADDLE_SPEED, PADDLE_Y, BALL_SIZE, BALL_SPEED,
     BRICK_TOP, BRICK_H, BRICK_VALUE, BRICK_ROWS, BRICK_COLS, LIVES, GAME_OVER_FRAMES,
     HUD_X, HUD_Y, HUD_W, HUD_H, PALETTES, PALETTE, DB16,
@@ -17,7 +17,7 @@ from game import (
 def test_render_shape_and_dtype():
     g = Game(seed=0)
     frame = g.render()
-    assert frame.shape == (96, 128, 3)
+    assert frame.shape == (H, W, 3)
     assert frame.dtype == np.uint8
 
 
@@ -198,9 +198,9 @@ def test_hud_renders_score_digits():
     hud = frame[HUD_Y:HUD_Y + HUD_H, HUD_X:HUD_X + HUD_W]
     assert (hud == white).all(axis=-1).any()
     assert (hud == black).all(axis=-1).any()
-    gx0 = HUD_X + 1                                              # first "0": top row solid, center hollow
-    assert (frame[HUD_Y + 1, gx0:gx0 + 3] == white).all()
-    assert (frame[HUD_Y + 3, gx0 + 1] == black).all()
+    gx0 = HUD_X + SCALE                                          # first "0": top row solid, center hollow
+    assert (frame[HUD_Y + SCALE, gx0:gx0 + 3 * SCALE] == white).all()      # "###" top row
+    assert (frame[HUD_Y + 3 * SCALE, gx0 + SCALE] == black).all()          # hollow middle of "0"
 
 
 # ---- key mapping ----

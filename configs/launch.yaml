@@ -1,5 +1,6 @@
 # launch tier: 4xH100 (or 4xH200/B200 if available), full dataset, the real launch run.
-# VAE d=256, 4+8 layers (~9.4M). DiT d=512, depth=16, ctx=16, shared AdaLN (~75M).
+# VAE d=256, 4+8 layers (~9.4M). DiT d=512, depth=16, ctx=8, patch4, shared AdaLN (~75M).
+# 256x192 + motion_weight (D021 scale-up + R5 motion-aware loss; validated at the small tier R3-R5).
 
 seed: 0
 
@@ -19,22 +20,22 @@ dit:
   depth: 16
   heads: 8                 # head_dim = 64
   head_dim: 64
-  patch_size: 2            # 48 spatial tok/frame
-  context_frames: 16       # full launch tier
+  patch_size: 4            # 256x192 latent 24x32 / 4 = 48 spatial tok/frame (R4/R5 validated; patch 2 = 192 = M6-shaky)
+  context_frames: 8        # M3: ctx8 matches ctx16 at ~2.7x less compute
   num_actions: 3          # NONE/LEFT/RIGHT (Breakout, D018)
   mlp_ratio: 4
 
 diffusion:
-  # measured on val episodes 2026-05-31 using checkpoints/vae_small.pt on baseline data
-  # (1700 frames × 192 tokens × 16 channels -> torch.std). 4.58x the EDM default of 0.5.
-  # NOTE: re-measure after V6 (launch VAE) if it produces materially different latent magnitudes.
-  sigma_data: 2.29
+  # measured on the 256x192 vae_small latents 2026-06-03 (~25M scalars -> torch.std). PLACEHOLDER for the
+  # launch tier -- RE-MEASURE after the launch VAE trains (M7) and update if it shifts materially.
+  sigma_data: 2.44
   sigma_min: 0.002
   sigma_max: 80.0
   rho: 7.0
   p_mean: -0.4
   p_std: 1.0
   forcing: true
+  motion_weight: 15.0      # R5: up-weight the moving region (the ball) so the DiT can't static-collapse
   num_sample_steps: 16
 
 training:
@@ -52,5 +53,7 @@ training:
   ckpt_every: 5000
 
 data:
-  index_path: data/full/index.parquet         # V5 generates this
-  cache_size: 220          # cache *all* train episodes (195) -> after warmup, zero data-loader misses
+  # VAE (M7·2) trains on BASELINE (500K, 256x192) -- quality saturates well before 5M, and full at 256x192
+  # is ~720 GB decompressed (won't cache). SWITCH to data/full_latents + pre_encoded:true for the DiT (M7·4).
+  index_path: data/baseline/index.parquet
+  cache_size: 16           # baseline = 16 episodes; caches fully in the 300 GB launch-VAE container

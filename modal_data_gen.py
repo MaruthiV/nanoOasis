@@ -12,7 +12,9 @@
 import modal
 
 
-app = modal.App("nano-oasis-data")
+# app name must NOT collide with the volume name "nano-oasis-data" -- Modal tangles the two
+# permission ACLs (an app "does not have write access to itself"), which crash-loops the run.
+app = modal.App("nano-oasis-datagen")
 
 # minimal image -- data generation only needs game.py + data_gen.py and their deps
 image = (

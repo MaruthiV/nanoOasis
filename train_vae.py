@@ -57,7 +57,7 @@ def cosine_lr(step: int, warmup: int, total: int, base: float) -> float:
     return 0.5 * base * (1.0 + math.cos(math.pi * min(progress, 1.0)))
 
 
-def main(config_name: str = "tiny", total_steps: int | None = None) -> None:
+def main(config_name: str = "tiny", total_steps: int | None = None, on_checkpoint=None) -> None:
     cfg = OmegaConf.load(f"configs/{config_name}.yaml")
     if total_steps is not None:
         cfg.training.total_steps = total_steps
@@ -134,11 +134,15 @@ def main(config_name: str = "tiny", total_steps: int | None = None) -> None:
         if step > 0 and step % cfg.training.ckpt_every == 0:
             torch.save({"model": _strip_lpips(model.state_dict()), "step": step,
                         "config": OmegaConf.to_container(cfg)}, ckpt_path)
+            if on_checkpoint is not None:
+                on_checkpoint()                # commit the volume so we can pull mid-run (D021 gate + preemption safety)
 
         step += 1
 
     torch.save({"model": _strip_lpips(model.state_dict()), "step": step,
                 "config": OmegaConf.to_container(cfg)}, ckpt_path)
+    if on_checkpoint is not None:
+        on_checkpoint()
     elapsed = time.time() - t0
     final_l1 = sum(recent_l1) / max(1, len(recent_l1))
     print(f"done. {step} steps, {elapsed:.0f}s, {step/elapsed:.1f} steps/s. "

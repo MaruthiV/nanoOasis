@@ -28,7 +28,7 @@ image = (
     )
     # ship every project module the training functions transitively touch
     .add_local_python_source(
-        "game", "data_gen", "data", "vae", "model", "diffusion", "train_vae", "train",
+        "game", "data_gen", "data", "vae", "model", "diffusion", "train_vae", "train", "encode_latents",
     )
     .add_local_dir("configs", "/root/configs")
 )
@@ -63,47 +63,50 @@ def _wire_paths_and_data():
 
 # ---- VAE: A100-80GB for tiny/small tiers (fastest at small VAE compute profile) ----
 
-@app.function(image=image, gpu="A100-80GB", volumes=VOLS, timeout=6 * 3600)
+@app.function(image=image, gpu="A100-80GB", volumes=VOLS, timeout=12 * 3600,
+              memory=128 * 1024)                  # hold the 256x192 baseline episode cache in RAM (~74 GB; D021)
 def train_vae_remote(config_name: str = "tiny", smoke: bool = False, steps: int | None = None) -> None:
     _wire_paths_and_data()
     from train_vae import main
     if smoke and steps is None:
         steps = 500
-    main(config_name=config_name, total_steps=steps)
+    main(config_name=config_name, total_steps=steps, on_checkpoint=ckpt_vol.commit)
     ckpt_vol.commit()
     print("checkpoint committed to nano-oasis-ckpts volume")
 
 
 @app.function(image=image, gpu="B200", volumes=VOLS, timeout=24 * 3600,
-              memory=300 * 1024,                           # 300 GB to hold the full episode cache in RAM
+              memory=300 * 1024,                           # holds the 256x192 baseline episode cache (~74 GB) in RAM
               secrets=[modal.Secret.from_name("wandb")])
 def train_vae_launch(steps: int | None = None) -> None:
     _wire_paths_and_data()
     from train_vae import main
-    main(config_name="launch", total_steps=steps)
+    main(config_name="launch", total_steps=steps, on_checkpoint=ckpt_vol.commit)
     ckpt_vol.commit()
 
 
 # ---- DiT: A100-80GB for tiny/small tiers, 4xH100 for the launch run ----
 
 @app.function(image=image, gpu="A100-80GB", volumes=VOLS, timeout=12 * 3600,
+              memory=128 * 1024,                  # 256x192 baseline episode cache ~74 GB in RAM (D021)
               secrets=[modal.Secret.from_name("wandb")])
 def train_dit_remote(config_name: str = "tiny", smoke: bool = False, steps: int | None = None) -> None:
     _wire_paths_and_data()
     from train import main
     if smoke and steps is None:
         steps = 500
-    main(stage="dit", config_name=config_name, total_steps=steps)
+    main(stage="dit", config_name=config_name, total_steps=steps, on_checkpoint=ckpt_vol.commit)
     ckpt_vol.commit()
 
 
-@app.function(image=image, gpu="H100:4", volumes=VOLS, timeout=24 * 3600)
+@app.function(image=image, gpu="H100:4", volumes=VOLS, timeout=24 * 3600,
+              secrets=[modal.Secret.from_name("wandb")])
 def train_dit_launch() -> None:
-    # Modal caps a single function call at 24h; longer launch runs need resume logic
-    # in train.py (Phase 5 M7 enhancement). For now, 24h is one segment.
+    # train.py checkpoints+commits every ckpt_every and resumes from the committed ckpt on restart,
+    # so preemptions are survivable. The 24h/call cap is just a relaunch (it resumes where it left off).
     _wire_paths_and_data()
     from train import main
-    main(stage="dit", config_name="launch")
+    main(stage="dit", config_name="launch", on_checkpoint=ckpt_vol.commit)
     ckpt_vol.commit()
 
 
@@ -114,6 +117,17 @@ def distill_lcm_remote(config_name: str = "launch") -> None:
     _wire_paths_and_data()
     # distill.py lands in Phase 6 (task I2); this function is the entrypoint that will call it.
     raise NotImplementedError("LCM distillation lands in Phase 6 / task I2")
+
+
+# ---- latent pre-encoding: VAE-encode a frame dataset to latent shards (the launch-run data path) ----
+
+@app.function(image=image, gpu="A100-80GB", volumes=VOLS, timeout=6 * 3600)
+def encode_latents_remote(tier: str = "baseline", vae: str = "vae_launch.pt", config: str = "launch") -> None:
+    # run after the launch VAE is trained: writes /data/<tier>_latents for pre-encoded DiT training (M7)
+    _wire_paths_and_data()
+    from encode_latents import encode_dir
+    encode_dir(f"data/{tier}/index.parquet", f"checkpoints/{vae}", config, f"data/{tier}_latents")
+    data_vol.commit()
 
 
 # ---- local entrypoint -- this is what `modal run modal_train.py --stage ... --config ...` invokes ----

@@ -36,7 +36,7 @@ diffusion:
 
 training:
   device: auto
-  batch_size: 16           # 16 windows x 17 frames = 272 frames/step for VAE; A100 has headroom
+  batch_size: 4            # 256x192 is 4x the pixels -> B=4 (68 frames/step) fits A100-80GB; B=16 OOMs in LPIPS (D021)
   lr: 1.0e-4
   betas: [0.9, 0.95]
   weight_decay: 0.0

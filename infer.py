@@ -14,7 +14,7 @@ from omegaconf import OmegaConf
 from vae import VAE
 from model import DiT
 from diffusion import EDMDiffusion
-from game import (Game, _keys_to_action, W, H, PALETTE, DB16,
+from game import (Game, _keys_to_action, SCALE, W, H, PALETTE, DB16,
                   BRICK_TOP, BRICK_H, BRICK_W, BRICK_ROWS, BRICK_COLS, BALL_SPEED)
 
 
@@ -222,7 +222,7 @@ def plausibility(ckpt_path, vae_path, config_name, n_frames, num_steps, sigma_st
 
     def detect_ball(f):
         m = (f[:, :, 0] > 200) & (f[:, :, 1] > 200) & (f[:, :, 2] > 200)
-        m[:8, :] = False                                    # drop the top HUD + lives strip
+        m[:8 * SCALE, :] = False                            # drop the top HUD + lives strip (scales with the game)
         ys, xs = np.where(m)
         return (float(xs.mean()), float(ys.mean())) if len(xs) else None
 

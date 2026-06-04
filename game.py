@@ -1,4 +1,4 @@
-# nanoOasis Breakout. Deterministic, headless-friendly, single-screen 128x96.
+# nanoOasis Breakout. Deterministic, headless-friendly, single-screen (256x192 at SCALE=2; D021).
 # Pivoted from a platformer (DECISIONS D018): the platformer was ~99.6% static per frame, so the
 # world model had no dynamics to learn (M1 horizon-2x = 1, see EXPERIMENTS). Breakout keeps a ball
 # moving every frame -- the regime DIAMOND models on Atari -- while staying single-screen (D017 holds).
@@ -6,27 +6,31 @@
 from dataclasses import dataclass
 import numpy as np
 
-W, H = 128, 96
+# SCALE multiplies the base 128x96 game so the ball clears the VAE's 8px tile (DECISIONS D021).
+# SCALE=1 is the original 128x96; SCALE=2 -> 256x192 with an 8px ball. Everything below is base*SCALE
+# so proportions + feel are identical at any scale. Bump SCALE if the ball still needs more tiles.
+SCALE = 2
+W, H = 128 * SCALE, 96 * SCALE
 NUM_ACTIONS = 3  # NONE, LEFT, RIGHT
 
 # paddle + ball physics per 30fps frame
-PADDLE_W, PADDLE_H = 24, 4
-PADDLE_Y = H - 8                        # top y of the paddle row
-PADDLE_SPEED = 3.0
-BALL_SIZE = 4
-BALL_SPEED = 2.5                        # constant magnitude; velocity is a unit vector * BALL_SPEED
-MAX_BOUNCE = 1.0                        # paddle english, radians off vertical at the paddle edge
+PADDLE_W, PADDLE_H = 24 * SCALE, 4 * SCALE
+PADDLE_Y = H - 8 * SCALE                # top y of the paddle row
+PADDLE_SPEED = 3.0 * SCALE
+BALL_SIZE = 4 * SCALE
+BALL_SPEED = 2.5 * SCALE                # constant magnitude; velocity is a unit vector * BALL_SPEED
+MAX_BOUNCE = 1.0                        # paddle english, radians off vertical at the paddle edge (dimensionless)
 
-# brick grid -- 8 cols x 6 rows spans the full 128 width, below the HUD
-BRICK_W, BRICK_H = 16, 6
+# brick grid -- 8 cols x 6 rows spans the full width, below the HUD
+BRICK_W, BRICK_H = 16 * SCALE, 6 * SCALE
 BRICK_COLS, BRICK_ROWS = 8, 6
-BRICK_TOP = 14
+BRICK_TOP = 14 * SCALE
 BRICK_VALUE = 10
 LIVES = 3                              # lose one per miss; at 0 the game is over, then a fresh game
 GAME_OVER_FRAMES = 12                  # dimmed hold on game over before the reset
 
-# HUD: 3 zero-padded digits, top-right, 3x5 white-on-black font (unchanged from the platformer)
-HUD_W, HUD_H = 13, 7
+# HUD: 3 zero-padded digits, top-right, 3x5 white-on-black font scaled by SCALE (no pygame.font)
+HUD_W, HUD_H = 13 * SCALE, 7 * SCALE
 HUD_X = W - HUD_W
 HUD_Y = 0
 
@@ -201,7 +205,7 @@ class Game:
             for c in range(BRICK_COLS):
                 if self.bricks[r, c]:
                     x0 = c * BRICK_W
-                    fb[y0:y0 + BRICK_H - 1, x0:x0 + BRICK_W - 1] = color   # -1 leaves a grid gap
+                    fb[y0:y0 + BRICK_H - SCALE, x0:x0 + BRICK_W - SCALE] = color   # SCALE-px grid gap
 
         px = int(self.paddle_x)
         fb[PADDLE_Y:PADDLE_Y + PADDLE_H, px:px + PADDLE_W] = PADDLE_COLOR
@@ -211,18 +215,19 @@ class Game:
 
         # lives: one small marker per remaining life, top-left
         for i in range(self.lives):
-            lx = 1 + i * (BALL_SIZE + 1)
-            fb[1:1 + BALL_SIZE, lx:lx + BALL_SIZE] = BALL_COLOR
+            lx = SCALE + i * (BALL_SIZE + SCALE)
+            fb[SCALE:SCALE + BALL_SIZE, lx:lx + BALL_SIZE] = BALL_COLOR
 
         # HUD: black box + 3 zero-padded digits, top-right. wrap at 999 so it always fits.
         fb[HUD_Y:HUD_Y + HUD_H, HUD_X:HUD_X + HUD_W] = DB16[0]
         white = DB16[15]
         for i, ch in enumerate(f"{self.score % 1000:03d}"):
-            gx = HUD_X + 1 + i * 4
+            gx = HUD_X + SCALE + i * 4 * SCALE
             for j, row in enumerate(DIGITS[ch]):
                 for k, c in enumerate(row):
                     if c == "#":
-                        fb[HUD_Y + 1 + j, gx + k] = white
+                        yy, xx = HUD_Y + SCALE + j * SCALE, gx + k * SCALE
+                        fb[yy:yy + SCALE, xx:xx + SCALE] = white       # each font pixel -> SCALE block
 
         if self.over_frames > 0:                        # dim the whole screen during the game-over hold
             fb = (fb.astype(np.float32) * 0.35).astype(np.uint8)
@@ -242,7 +247,8 @@ def _keys_to_action(left: bool, right: bool, jump: bool = False) -> int:
 def play(seed: int = 0) -> None:
     import pygame
     pygame.init()
-    screen = pygame.display.set_mode((W * 4, H * 4))
+    up = max(1, 512 // W)                                # display upscale -> ~512px window at any SCALE
+    screen = pygame.display.set_mode((W * up, H * up))
     pygame.display.set_caption("nanoOasis (Breakout)")
     clock = pygame.time.Clock()
 
@@ -260,7 +266,7 @@ def play(seed: int = 0) -> None:
         frame, _, _ = game.step(action)
         # pygame.surfarray uses (W, H, 3); see BUGS.md H005
         surf = pygame.surfarray.make_surface(np.transpose(frame, (1, 0, 2)))
-        screen.blit(pygame.transform.scale(surf, (W * 4, H * 4)), (0, 0))
+        screen.blit(pygame.transform.scale(surf, (W * up, H * up)), (0, 0))
         pygame.display.flip()
         clock.tick(30)
 
@@ -285,5 +291,5 @@ if __name__ == "__main__":
             seed = int(sys.argv[sys.argv.index("--seed") + 1])
         play(seed=seed)
     else:
-        print("usage: python game.py --play [--seed N]   # interactive 512x384 window")
+        print("usage: python game.py --play [--seed N]   # interactive upscaled window")
         print("       python game.py --preview           # write assets/preview_*.png")

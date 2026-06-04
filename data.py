@@ -54,4 +54,5 @@ class EpisodeWindowDataset(IterableDataset):
             else:
                 cache.move_to_end(ep["path"])              # mark recently used
 
-            yield data["frames"][start:start + WINDOW], data["actions"][start:start + WINDOW]
+            arr = data["latents"] if "latents" in data else data["frames"]   # pre-encoded latents or raw frames
+            yield arr[start:start + WINDOW], data["actions"][start:start + WINDOW]

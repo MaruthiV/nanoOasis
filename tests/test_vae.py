@@ -2,6 +2,7 @@ import numpy as np
 import torch
 from omegaconf import OmegaConf
 
+from game import W, H
 from vae import VAE
 
 
@@ -17,16 +18,17 @@ def test_vae_tiny_param_count_around_1M():
 
 def test_vae_forward_shapes_round_trip():
     m = VAE(_tiny_cfg())
-    x = torch.randint(0, 255, (2, 96, 128, 3), dtype=torch.uint8)
+    x = torch.randint(0, 255, (2, H, W, 3), dtype=torch.uint8)
     recon, mu, logvar = m(x)
-    assert recon.shape == (2, 96, 128, 3)
-    assert mu.shape == (2, 192, 16)        # 192 tokens, 16 latent channels
-    assert logvar.shape == (2, 192, 16)
+    assert recon.shape == (2, H, W, 3)
+    n = m.Hp * m.Wp                         # Hp*Wp tokens (768 at 256x192, patch 8)
+    assert mu.shape == (2, n, 16)          # 16 latent channels
+    assert logvar.shape == (2, n, 16)
 
 
 def test_vae_loss_runs_and_backprops():
     m = VAE(_tiny_cfg())
-    x = torch.randint(0, 255, (2, 96, 128, 3), dtype=torch.uint8)
+    x = torch.randint(0, 255, (2, H, W, 3), dtype=torch.uint8)
     recon, mu, logvar = m(x)
     loss, info = m.loss(x, recon, mu, logvar)
     loss.backward()

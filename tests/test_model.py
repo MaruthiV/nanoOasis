@@ -1,7 +1,7 @@
 import torch
 from omegaconf import OmegaConf
 
-from model import DiT, patchify, unpatchify
+from model import DiT, patchify, unpatchify, LATENT_H, LATENT_W
 from diffusion import EDMDiffusion
 
 
@@ -26,7 +26,7 @@ def test_dit_shapes_and_init():
 
     # forward pass on the tiny tier dummy
     B, T = 2, 4
-    x = torch.randn(B, T, 16, 12, 16)
+    x = torch.randn(B, T, 16, LATENT_H, LATENT_W)
     sigma = torch.randn(B, T)
     action = torch.randint(0, 3, (B, T))
     out = m(x, sigma, action)
@@ -64,7 +64,7 @@ def test_diffusion_forcing_sigma_sampling_returns_per_frame_shape():
 def test_diffusion_forcing_denoise_output_shape_matches_input():
     diff = _tiny_diff()
     B, T = 2, 4
-    x = torch.randn(B, T, 16, 12, 16)
+    x = torch.randn(B, T, 16, LATENT_H, LATENT_W)
     sigma = torch.full((B, T), 1.0)
     action = torch.randint(0, 3, (B, T))
     D = diff.denoise(x, sigma, action)
@@ -83,7 +83,7 @@ def test_diffusion_forcing_c_shape_is_per_frame_not_per_window():
 
 def test_diffusion_forcing_loss_runs_and_backprops():
     diff = _tiny_diff()
-    x = torch.randn(2, 4, 16, 12, 16)
+    x = torch.randn(2, 4, 16, LATENT_H, LATENT_W)
     action = torch.randint(0, 3, (2, 4))
     loss, info = diff.loss(x, action)
     loss.backward()

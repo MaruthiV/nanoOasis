@@ -78,7 +78,8 @@ def encode_window(vae: VAE, frames: torch.Tensor) -> torch.Tensor:
     return z.view(B, T, vae.latent_channels, vae.Hp, vae.Wp)
 
 
-def main(stage: str = "dit", config_name: str = "tiny", total_steps: int | None = None) -> None:
+def main(stage: str = "dit", config_name: str = "tiny", total_steps: int | None = None,
+         on_checkpoint=None) -> None:
     cfg = OmegaConf.load(f"configs/{config_name}.yaml")
     if total_steps is not None:
         cfg.training.total_steps = total_steps
@@ -87,19 +88,22 @@ def main(stage: str = "dit", config_name: str = "tiny", total_steps: int | None 
 
     torch.manual_seed(cfg.seed)
     T_use = cfg.dit.context_frames                                      # model's RoPE expects exactly this T
+    pre_encoded = bool(cfg.data.get("pre_encoded", False))             # shards hold VAE latents -> skip the encode
 
     # data
     ds = EpisodeWindowDataset(cfg.data.index_path, split="train",
                               cache_size=cfg.data.cache_size, seed=cfg.seed)
     loader = DataLoader(ds, batch_size=cfg.training.batch_size, num_workers=0)
 
-    # frozen VAE
-    vae_ckpt_path = cfg.get("vae_ckpt", f"checkpoints/vae_{config_name}.pt")   # ablation configs share one VAE
-    vae_ckpt = torch.load(vae_ckpt_path, weights_only=False, map_location=device)
-    vae = VAE(cfg.vae).to(device).eval()
-    vae.load_state_dict(vae_ckpt["model"])
-    for p in vae.parameters():
-        p.requires_grad = False
+    # frozen VAE -- only needed for raw frames; pre-encoded latents skip it entirely
+    vae = None
+    if not pre_encoded:
+        vae_ckpt_path = cfg.get("vae_ckpt", f"checkpoints/vae_{config_name}.pt")   # ablation configs share one VAE
+        vae_ckpt = torch.load(vae_ckpt_path, weights_only=False, map_location=device)
+        vae = VAE(cfg.vae).to(device).eval()
+        vae.load_state_dict(vae_ckpt["model"])
+        for p in vae.parameters():
+            p.requires_grad = False
 
     # DiT + diffusion
     model = DiT(cfg.dit).to(device)
@@ -115,6 +119,25 @@ def main(stage: str = "dit", config_name: str = "tiny", total_steps: int | None 
     ckpt_dir.mkdir(exist_ok=True)
     ckpt_path = ckpt_dir / f"dit_{config_name}.pt"
 
+    def save_ckpt(s: int) -> None:
+        torch.save({"model": model.state_dict(), "ema": ema.shadow, "opt": opt.state_dict(),
+                    "step": s, "config": OmegaConf.to_container(cfg)}, ckpt_path)
+        if on_checkpoint is not None:
+            on_checkpoint()                # commit the Modal volume so the ckpt survives preemption
+
+    # resume from a committed checkpoint if the run is incomplete -- preemption recovery (needed for M7)
+    start_step = 0
+    if ckpt_path.exists():
+        ck = torch.load(ckpt_path, weights_only=False, map_location=device)
+        if int(ck.get("step", 0)) < cfg.training.total_steps:
+            model.load_state_dict(ck["model"])
+            if "opt" in ck:
+                opt.load_state_dict(ck["opt"])
+            if "ema" in ck:
+                ema.shadow = {k: v.to(device) for k, v in ck["ema"].items()}
+            start_step = int(ck.get("step", 0))
+            print(f"resuming from {ckpt_path} at step {start_step}")
+
     # sigma-bucket loss curve -- mandatory standing diagnostic (EXPERIMENTS.md). 10 log-spaced bins.
     n_buckets = 10
     bucket_edges = torch.logspace(math.log10(cfg.diffusion.sigma_min),
@@ -122,18 +145,19 @@ def main(stage: str = "dit", config_name: str = "tiny", total_steps: int | None 
     bucket_loss = torch.zeros(n_buckets, device=device)
     bucket_cnt = torch.zeros(n_buckets, device=device)
 
-    step = 0
+    step = start_step
     t0 = time.time()
     recent: list[float] = []
     for frames, actions in loader:
         if step >= cfg.training.total_steps:
             break
-        # use the last T_use frames + their actions; dataset yields 17, model wants context_frames (4 for tiny)
-        frames = frames[:, -T_use:].to(device)
+        # dataset yields the last T_use of WINDOW frames/latents + actions (model wants context_frames)
         actions = actions[:, -T_use:].long().to(device)
-
-        with torch.no_grad():
-            z = encode_window(vae, frames)                              # (B, T, C, Hp, Wp)
+        if pre_encoded:
+            z = frames[:, -T_use:].to(device).float()                  # `frames` is actually latents (B, T, C, Hp, Wp)
+        else:
+            with torch.no_grad():
+                z = encode_window(vae, frames[:, -T_use:].to(device))  # (B, T, C, Hp, Wp)
 
         lr = cosine_lr(step, cfg.training.warmup_steps, cfg.training.total_steps, cfg.training.lr)
         for g in opt.param_groups:
@@ -158,7 +182,7 @@ def main(stage: str = "dit", config_name: str = "tiny", total_steps: int | None 
         if step % cfg.training.log_every == 0:
             mean = sum(recent) / len(recent)
             elapsed = time.time() - t0
-            sps = (step + 1) / max(elapsed, 1e-6)
+            sps = (step - start_step + 1) / max(elapsed, 1e-6)
             print(f"step {step:5d}  loss {mean:.4f}  σ̄ {info['sigma_mean']:.3f}  "
                   f"lr {lr:.2e}  {sps:.1f} steps/s  {elapsed:.0f}s")
             if wandb_run is not None:
@@ -184,16 +208,14 @@ def main(stage: str = "dit", config_name: str = "tiny", total_steps: int | None 
             bucket_cnt.zero_()
 
         if step > 0 and step % cfg.training.ckpt_every == 0:
-            torch.save({"model": model.state_dict(), "ema": ema.shadow, "step": step,
-                        "config": OmegaConf.to_container(cfg)}, ckpt_path)
+            save_ckpt(step)
         step += 1
 
-    torch.save({"model": model.state_dict(), "ema": ema.shadow, "step": step,
-                "config": OmegaConf.to_container(cfg)}, ckpt_path)
+    save_ckpt(step)
     elapsed = time.time() - t0
     final = sum(recent) / max(1, len(recent))
-    print(f"done. {step} steps, {elapsed:.0f}s, {step/elapsed:.1f} steps/s. "
-          f"final loss {final:.4f}. saved {ckpt_path}")
+    print(f"done. {step} steps ({step - start_step} this run), {elapsed:.0f}s, "
+          f"{(step - start_step) / max(elapsed, 1e-6):.1f} steps/s. final loss {final:.4f}. saved {ckpt_path}")
     if wandb_run is not None:
         wandb_run.summary["final_loss"] = final
         wandb_run.finish()

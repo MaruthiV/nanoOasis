@@ -24,6 +24,8 @@ class EDMDiffusion(nn.Module):
         self.p_mean = float(cfg.p_mean)
         self.p_std = float(cfg.p_std)
         self.forcing = bool(cfg.get("forcing", True))   # D002; False = one shared sigma per window (M2 ablation)
+        self.precond_mode = str(cfg.get("precond", "edm"))   # M5; "eps" = naive epsilon-prediction baseline
+        self.motion_weight = float(cfg.get("motion_weight", 0.0))   # R5/D018; >0 up-weights moving regions (the ball)
 
     def sample_sigma(self, B: int, T: int, device) -> torch.Tensor:
         # log-σ ~ N(P_mean, P_std). Diffusion Forcing (D002): per-frame (B, T).
@@ -44,8 +46,12 @@ class EDMDiffusion(nn.Module):
         return c_skip, c_out, c_in, c_noise
 
     def denoise(self, x_noisy: torch.Tensor, sigma: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
-        # x_noisy: (B, T, C, H, W); sigma: (B, T); action: (B, T) ints
+        # x_noisy: (B, T, C, H, W); sigma: (B, T); action: (B, T) ints. Returns the denoised x0 estimate.
         c_skip, c_out, c_in, c_noise = self.precond(sigma)
+        if self.precond_mode == "eps":
+            # M5 baseline: naive epsilon-prediction (no EDM in/out scaling); x0 = x_noisy - sigma*eps.
+            eps = self.model(x_noisy, c_noise, action)
+            return x_noisy - _bcast(sigma) * eps
         f_out = self.model(_bcast(c_in) * x_noisy, c_noise, action)
         return _bcast(c_skip) * x_noisy + _bcast(c_out) * f_out
 
@@ -61,6 +67,13 @@ class EDMDiffusion(nn.Module):
         w = (sigma * sigma + self.sigma_data ** 2) / (sigma * self.sigma_data) ** 2
         per_elem = (D - x_clean) ** 2
         weighted = _bcast(w) * per_elem
+        if self.motion_weight > 0:
+            # up-weight regions that move frame-to-frame (the ball, paddle, brick-breaks) so the model
+            # can't minimize loss by hedging the tiny dynamic part away into a static scene (R5, D018).
+            mot = (x_clean[:, 1:] - x_clean[:, :-1]).abs().mean(dim=2, keepdim=True)   # (B, T-1, 1, H, W)
+            mot = torch.cat([torch.zeros_like(mot[:, :1]), mot], dim=1)               # t=0 has no reference
+            mot_norm = mot / (mot.amax(dim=(3, 4), keepdim=True) + 1e-6)              # per-frame spatial max -> [0,1]
+            weighted = weighted * (1.0 + self.motion_weight * mot_norm)
         loss = weighted.mean()
         per_frame = weighted.mean(dim=(2, 3, 4))                          # (B, T) -- for the sigma-bucket diagnostic
         return loss, {
