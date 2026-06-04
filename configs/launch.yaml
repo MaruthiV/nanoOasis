@@ -17,7 +17,7 @@ vae:
 
 dit:
   hidden_dim: 512
-  depth: 16
+  depth: 24                # bumped 16→24 (~104M DiT): capacity to pre-empt the brick flicker (R5); D008 stretch
   heads: 8                 # head_dim = 64
   head_dim: 64
   patch_size: 4            # 256x192 latent 24x32 / 4 = 48 spatial tok/frame (R4/R5 validated; patch 2 = 192 = M6-shaky)
@@ -26,9 +26,9 @@ dit:
   mlp_ratio: 4
 
 diffusion:
-  # measured on the 256x192 vae_small latents 2026-06-03 (~25M scalars -> torch.std). PLACEHOLDER for the
-  # launch tier -- RE-MEASURE after the launch VAE trains (M7) and update if it shifts materially.
-  sigma_data: 2.44
+  # measured 2026-06-04 on the actual launch latents (data/full_latents, vae_launch.pt): std = 2.88.
+  # (the prior 2.44 was the small VAE's latents -- training EDM at the wrong scale is the H003 hazard.)
+  sigma_data: 2.88
   sigma_min: 0.002
   sigma_max: 80.0
   rho: 7.0
@@ -53,7 +53,7 @@ training:
   ckpt_every: 5000
 
 data:
-  # VAE (M7·2) trains on BASELINE (500K, 256x192) -- quality saturates well before 5M, and full at 256x192
-  # is ~720 GB decompressed (won't cache). SWITCH to data/full_latents + pre_encoded:true for the DiT (M7·4).
-  index_path: data/baseline/index.parquet
-  cache_size: 16           # baseline = 16 episodes; caches fully in the 300 GB launch-VAE container
+  # DiT (M7) trains on the pre-encoded full latents (M7·3): 5M frames -> data/full_latents (~120 GB fp16).
+  index_path: data/full_latents/index.parquet
+  pre_encoded: true        # shards hold VAE latents -> train.py skips the per-step encode
+  cache_size: 220          # cache all 195 train latent episodes (~120 GB) -> zero loader misses (needs ~200 GB RAM)

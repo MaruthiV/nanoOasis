@@ -99,9 +99,11 @@ def train_dit_remote(config_name: str = "tiny", smoke: bool = False, steps: int 
     ckpt_vol.commit()
 
 
-@app.function(image=image, gpu="H100:4", volumes=VOLS, timeout=24 * 3600,
+@app.function(image=image, gpu="B200", volumes=VOLS, timeout=24 * 3600,
+              memory=200 * 1024,                  # hold all 195 train latent episodes (~120 GB) in RAM
               secrets=[modal.Secret.from_name("wandb")])
 def train_dit_launch() -> None:
+    # single B200 (fastest single card; DDP skipped to avoid silent data-sharding bugs on the expensive run).
     # train.py checkpoints+commits every ckpt_every and resumes from the committed ckpt on restart,
     # so preemptions are survivable. The 24h/call cap is just a relaunch (it resumes where it left off).
     _wire_paths_and_data()
