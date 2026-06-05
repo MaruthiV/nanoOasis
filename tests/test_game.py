@@ -3,11 +3,11 @@ import hashlib
 import numpy as np
 
 from game import (
-    Game, SCALE, W, H, NUM_ACTIONS,
+    Game, W, H, NUM_ACTIONS,
     PADDLE_W, PADDLE_SPEED, PADDLE_Y, BALL_SIZE, BALL_SPEED,
-    BRICK_TOP, BRICK_H, BRICK_VALUE, BRICK_ROWS, BRICK_COLS, LIVES, GAME_OVER_FRAMES,
-    HUD_X, HUD_Y, HUD_W, HUD_H, PALETTES, PALETTE, DB16,
-    PADDLE_COLOR, BALL_COLOR, DIGITS, _keys_to_action,
+    BRICK_TOP, BRICK_H, BRICK_VALUE, BRICK_ROWS, BRICK_COLS,
+    PALETTES, PALETTE, DB16,
+    PADDLE_COLOR, BALL_COLOR, _keys_to_action,
 )
 
 
@@ -44,8 +44,7 @@ def test_ball_moves_every_frame():
     for _ in range(200):
         a = 1 if g.ball.x < g.paddle_x else 2           # track to keep the ball alive
         g.step(a)
-        if g.over_frames == 0:                          # ball freezes only during the game-over hold
-            assert (g.ball.x, g.ball.y) != prev, "ball stalled during play"
+        assert (g.ball.x, g.ball.y) != prev, "ball stalled during play"
         prev = (g.ball.x, g.ball.y)
 
 
@@ -146,25 +145,7 @@ def test_ball_loss_increments_misses_and_relaunches():
     g.ball.vx, g.ball.vy = 0.0, BALL_SPEED
     g.step(0)
     assert g.misses == m0 + 1
-    assert g.lives == LIVES - 1
-    assert g.ball.y < H                                          # relaunched back into play
-
-
-def test_lives_decrement_and_game_over_resets():
-    g = Game(seed=0)
-    assert g.lives == LIVES
-    for expected in (LIVES - 1, LIVES - 2, 0):                  # three misses exhaust the lives
-        g.ball.x, g.ball.y = 60.0, float(H - 1)
-        g.ball.vx, g.ball.vy = 0.0, BALL_SPEED
-        g.step(0)
-        assert g.lives == expected, (expected, g.lives)
-    assert g.over_frames > 0                                    # game-over hold is active
-    g.score = 50                                               # gets wiped by the reset
-    for _ in range(GAME_OVER_FRAMES + 1):                      # ride out the hold -> fresh game
-        g.step(0)
-    assert g.over_frames == 0
-    assert g.lives == LIVES and g.score == 0 and g.games == 1
-    assert g.bricks.all()
+    assert g.ball.y < H                                          # relaunched at once -- no lives, always in play
 
 
 # ---- invariants over a long rollout ----
@@ -176,31 +157,7 @@ def test_ball_stays_in_bounds():
         a = 1 if g.ball.x + BALL_SIZE / 2 < g.paddle_x + PADDLE_W / 2 else 2
         g.step(a)
         assert 0 <= g.ball.x <= W - BALL_SIZE, (t, g.ball.x)
-        if g.over_frames == 0:                          # ball is parked off-screen during game over
-            assert g.ball.y < H, (t, g.ball.y)
-
-
-# ---- HUD ----
-
-
-def test_hud_digits_have_correct_shape():
-    assert set(DIGITS.keys()) == set("0123456789")
-    for ch, glyph in DIGITS.items():
-        assert len(glyph) == 5 and all(len(r) == 3 for r in glyph), ch
-
-
-def test_hud_renders_score_digits():
-    g = Game(seed=0, palette="classic")
-    g.score = 30
-    frame = g.render()
-    white = np.array(DB16[15], dtype=np.uint8)
-    black = np.array(DB16[0], dtype=np.uint8)
-    hud = frame[HUD_Y:HUD_Y + HUD_H, HUD_X:HUD_X + HUD_W]
-    assert (hud == white).all(axis=-1).any()
-    assert (hud == black).all(axis=-1).any()
-    gx0 = HUD_X + SCALE                                          # first "0": top row solid, center hollow
-    assert (frame[HUD_Y + SCALE, gx0:gx0 + 3 * SCALE] == white).all()      # "###" top row
-    assert (frame[HUD_Y + 3 * SCALE, gx0 + SCALE] == black).all()          # hollow middle of "0"
+        assert g.ball.y < H, (t, g.ball.y)              # always in play -- a miss relaunches at once
 
 
 # ---- key mapping ----

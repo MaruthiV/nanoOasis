@@ -13,26 +13,20 @@ SCALE = 2
 W, H = 128 * SCALE, 96 * SCALE
 NUM_ACTIONS = 3  # NONE, LEFT, RIGHT
 
-# paddle + ball physics per 30fps frame
-PADDLE_W, PADDLE_H = 24 * SCALE, 4 * SCALE
+# paddle + ball physics per 30fps frame. Ball + paddle are bold (>= 1.5 VAE tiles) so they render
+# crisply through the 8px-tile VAE -- the rework's clarity fix (see docs/TASKS.md CURRENT STATUS).
+PADDLE_W, PADDLE_H = 24 * SCALE, 6 * SCALE
 PADDLE_Y = H - 8 * SCALE                # top y of the paddle row
 PADDLE_SPEED = 3.0 * SCALE
-BALL_SIZE = 4 * SCALE
+BALL_SIZE = 6 * SCALE
 BALL_SPEED = 2.5 * SCALE                # constant magnitude; velocity is a unit vector * BALL_SPEED
 MAX_BOUNCE = 1.0                        # paddle english, radians off vertical at the paddle edge (dimensionless)
 
-# brick grid -- 8 cols x 6 rows spans the full width, below the HUD
+# brick grid -- 8 cols x 6 rows spans the full width, below a small top margin
 BRICK_W, BRICK_H = 16 * SCALE, 6 * SCALE
 BRICK_COLS, BRICK_ROWS = 8, 6
 BRICK_TOP = 14 * SCALE
 BRICK_VALUE = 10
-LIVES = 3                              # lose one per miss; at 0 the game is over, then a fresh game
-GAME_OVER_FRAMES = 12                  # dimmed hold on game over before the reset
-
-# HUD: 3 zero-padded digits, top-right, 3x5 white-on-black font scaled by SCALE (no pygame.font)
-HUD_W, HUD_H = 13 * SCALE, 7 * SCALE
-HUD_X = W - HUD_W
-HUD_Y = 0
 
 # palette variety -- the Breakout analogue of biomes, gives the dataset visual diversity
 PALETTES = ("classic", "cave", "sky", "lava")
@@ -68,20 +62,6 @@ PALETTE = {
 PADDLE_COLOR = DB16[10]
 BALL_COLOR = DB16[15]
 
-# 3x5 hand-coded digits (no pygame.font -- see BUGS.md H006).
-DIGITS = {
-    "0": ("###", "#.#", "#.#", "#.#", "###"),
-    "1": (".#.", "##.", ".#.", ".#.", "###"),
-    "2": ("###", "..#", ".#.", "#..", "###"),
-    "3": ("###", "..#", ".##", "..#", "###"),
-    "4": ("#.#", "#.#", "###", "..#", "..#"),
-    "5": ("###", "#..", "###", "..#", "###"),
-    "6": ("###", "#..", "###", "#.#", "###"),
-    "7": ("###", "..#", ".#.", "#..", "#.."),
-    "8": ("###", "#.#", "###", "#.#", "###"),
-    "9": ("###", "#.#", "###", "..#", "###"),
-}
-
 
 @dataclass
 class Ball:
@@ -97,11 +77,8 @@ class Game:
         self.seed = int(seed)
         self.palette = palette or PALETTES[int(self.rng.integers(0, len(PALETTES)))]
         self.score = 0
-        self.misses = 0                                 # total balls lost (monotonic)
-        self.lives = LIVES
+        self.misses = 0                                 # total balls lost (monotonic); ball relaunches at once
         self.board = 0                                  # boards cleared (monotonic)
-        self.games = 0                                  # games over -> fresh game (monotonic)
-        self.over_frames = 0                            # >0 during the game-over hold
         self.paddle_x = float((W - PADDLE_W) / 2)
         self.bricks = np.ones((BRICK_ROWS, BRICK_COLS), dtype=bool)
         self._launch_ball()
@@ -115,13 +92,6 @@ class Game:
             vx=BALL_SPEED * float(np.sin(angle)),
             vy=-BALL_SPEED * float(np.cos(angle)),
         )
-
-    def _new_game(self) -> None:
-        self.score = 0
-        self.lives = LIVES
-        self.bricks = np.ones((BRICK_ROWS, BRICK_COLS), dtype=bool)
-        self.paddle_x = float((W - PADDLE_W) / 2)
-        self._launch_ball()
 
     def _bounce_off_paddle(self, b: Ball) -> None:
         # bounce angle depends on where the ball hits the paddle -- classic Breakout english
@@ -143,14 +113,6 @@ class Game:
             b.y = BRICK_TOP + (row + 1) * BRICK_H if b.vy > 0 else BRICK_TOP + row * BRICK_H - BALL_SIZE
 
     def step(self, action: int) -> tuple[np.ndarray, float, bool]:
-        if self.over_frames > 0:                         # game-over hold: dimmed freeze, then a fresh game
-            self.over_frames += 1
-            if self.over_frames > GAME_OVER_FRAMES:
-                self.over_frames = 0
-                self.games += 1
-                self._new_game()
-            return self.render(), 0.0, False
-
         if action == 1:
             self.paddle_x -= PADDLE_SPEED
         elif action == 2:
@@ -179,16 +141,12 @@ class Game:
 
         self._hit_bricks(b)
 
-        if b.y >= H:                                    # ball lost -> lose a life
+        if b.y >= H:                                    # ball lost -> relaunch at once (no lives, always in play)
             self.misses += 1
-            self.lives -= 1
-            if self.lives <= 0:
-                self.over_frames = 1                     # game over -- hold, then a fresh game
-            else:
-                self.paddle_x = float((W - PADDLE_W) / 2)
-                self._launch_ball()
+            self.paddle_x = float((W - PADDLE_W) / 2)
+            self._launch_ball()
 
-        if self.over_frames == 0 and not self.bricks.any():   # board cleared -> fresh board
+        if not self.bricks.any():                       # board cleared -> fresh board
             self.board += 1
             self.bricks = np.ones((BRICK_ROWS, BRICK_COLS), dtype=bool)
             self._launch_ball()
@@ -212,25 +170,6 @@ class Game:
 
         bx, by = int(self.ball.x), int(self.ball.y)
         fb[max(by, 0):by + BALL_SIZE, max(bx, 0):bx + BALL_SIZE] = BALL_COLOR
-
-        # lives: one small marker per remaining life, top-left
-        for i in range(self.lives):
-            lx = SCALE + i * (BALL_SIZE + SCALE)
-            fb[SCALE:SCALE + BALL_SIZE, lx:lx + BALL_SIZE] = BALL_COLOR
-
-        # HUD: black box + 3 zero-padded digits, top-right. wrap at 999 so it always fits.
-        fb[HUD_Y:HUD_Y + HUD_H, HUD_X:HUD_X + HUD_W] = DB16[0]
-        white = DB16[15]
-        for i, ch in enumerate(f"{self.score % 1000:03d}"):
-            gx = HUD_X + SCALE + i * 4 * SCALE
-            for j, row in enumerate(DIGITS[ch]):
-                for k, c in enumerate(row):
-                    if c == "#":
-                        yy, xx = HUD_Y + SCALE + j * SCALE, gx + k * SCALE
-                        fb[yy:yy + SCALE, xx:xx + SCALE] = white       # each font pixel -> SCALE block
-
-        if self.over_frames > 0:                        # dim the whole screen during the game-over hold
-            fb = (fb.astype(np.float32) * 0.35).astype(np.uint8)
 
         return fb
 

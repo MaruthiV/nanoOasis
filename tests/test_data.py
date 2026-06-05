@@ -5,7 +5,7 @@ import time
 import numpy as np
 import zstandard as zstd
 
-from data_gen import collect_episode, write_shard, RandomBot, HeuristicBot, _worker, write_index
+from data_gen import collect_episode, write_shard, RandomBot, _worker, write_index
 from data import EpisodeWindowDataset, WINDOW
 
 from game import Game, W, H
@@ -86,41 +86,10 @@ def test_bot_random_stickiness_at_least_3():
     assert interior and min(interior) >= 3, runs[:20]
 
 
-# ---- D4: heuristic bot tracks the ball ----
-
-
-def _play(bot_cls, seeds, frames=1500):
-    score = misses = 0
-    for seed in seeds:
-        g = Game(seed=seed)
-        bot = bot_cls(np.random.default_rng(seed ^ 0xB07))
-        for _ in range(frames):
-            g.step(bot.act(g))
-        score += g.score
-        misses += g.misses
-    return score, misses
-
-
-def test_bot_heuristic_tracks_ball_direction():
-    bot = HeuristicBot(np.random.default_rng(99))
-    g = Game(seed=0)
-    g.paddle_x = 52.0                                  # paddle center ~64
-    g.ball.x = 110.0                                   # ball far to the right
-    assert sum(bot.act(g) == 2 for _ in range(200)) > 150   # tracks right (allowing the 10% random)
-    g.ball.x = 6.0                                     # ball far to the left
-    assert sum(bot.act(g) == 1 for _ in range(200)) > 150
-
-
-def test_bot_heuristic_loses_fewer_balls_than_random():
-    _, hm = _play(HeuristicBot, range(8))
-    _, rm = _play(RandomBot, range(8))
-    assert hm < rm, f"heuristic misses {hm} vs random {rm}"
-
-
 # ---- D5: parallel collection + parquet index ----
 
 
-def test_parallel_writes_n_shards_and_alternates_bots(tmp_path):
+def test_parallel_writes_n_shards_all_random(tmp_path):
     import multiprocessing as mp
     jobs = [(i, 200, str(tmp_path), i * 100_000) for i in range(4)]
     with mp.Pool(4) as pool:
@@ -136,11 +105,8 @@ def test_parallel_writes_n_shards_and_alternates_bots(tmp_path):
     assert table.num_rows == 4
     by_worker = {r["worker_id"]: r for r in table.to_pylist()}
     assert set(by_worker.keys()) == {0, 1, 2, 3}
-    # even workers run RandomBot, odd workers run HeuristicBot
-    assert by_worker[0]["bot_type"] == "RandomBot"
-    assert by_worker[1]["bot_type"] == "HeuristicBot"
-    assert by_worker[2]["bot_type"] == "RandomBot"
-    assert by_worker[3]["bot_type"] == "HeuristicBot"
+    # every worker runs RandomBot now -- 100% random play (the control fix, see data_gen.py)
+    assert all(r["bot_type"] == "RandomBot" for r in by_worker.values())
     # worker_id 0 -> "val" (0 % 20 == 0); others -> "train"
     assert by_worker[0]["split"] == "val"
     assert by_worker[1]["split"] == "train"

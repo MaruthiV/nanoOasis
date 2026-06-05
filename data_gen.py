@@ -13,11 +13,14 @@ import pathlib
 import numpy as np
 import zstandard as zstd
 
-from game import Game, H, W, PADDLE_W, BALL_SIZE
+from game import Game, H, W
 
 
 class RandomBot:
-    # action prior -- {NONE, LEFT, RIGHT}; paddle mostly moving so some rallies survive by luck
+    # action prior -- {NONE, LEFT, RIGHT}; paddle moves 80% of frames in decisive 3-8 frame holds.
+    # 100% random (no ball-tracking) so the paddle's motion is decorrelated from the ball: the model
+    # can only explain paddle motion via the action, not "follow the ball" (the M7 control bug -- see
+    # docs/TASKS.md CURRENT STATUS). This is the entire data half of the control fix.
     PROBS = np.array([0.2, 0.4, 0.4])
 
     def __init__(self, rng: np.random.Generator):
@@ -25,31 +28,12 @@ class RandomBot:
         self.held_remaining = 0
         self.current = 0
 
-    def act(self, game: Game) -> int:                # game unused; HeuristicBot reads it
+    def act(self, game: Game) -> int:                # game unused; signature kept for collect_episode
         if self.held_remaining == 0:
             self.current = int(self.rng.choice(3, p=self.PROBS))
             self.held_remaining = int(self.rng.integers(3, 9))   # 3..8 inclusive
         self.held_remaining -= 1
         return self.current
-
-
-class HeuristicBot:
-    """Track the ball: nudge the paddle so its center sits under the ball."""
-
-    def __init__(self, rng: np.random.Generator):
-        self.rng = rng
-
-    def act(self, g: Game) -> int:
-        # occasional random move covers off-ball paddle positions for the model to learn from
-        if self.rng.random() < 0.1:
-            return int(self.rng.integers(0, 3))
-        paddle_c = g.paddle_x + PADDLE_W / 2
-        ball_c = g.ball.x + BALL_SIZE / 2
-        if ball_c < paddle_c - 2:
-            return 1
-        if ball_c > paddle_c + 2:
-            return 2
-        return 0
 
 
 def collect_episode(seed: int, n_frames: int, bot_cls=RandomBot
@@ -63,12 +47,12 @@ def collect_episode(seed: int, n_frames: int, bot_cls=RandomBot
 
     for t in range(n_frames):
         action = bot.act(g)
-        prev_misses, prev_board, prev_games = g.misses, g.board, g.games
+        prev_misses, prev_board = g.misses, g.board
         frame, _, _ = g.step(action)
         frames[t] = frame
         actions[t] = action
-        level_seeds[t] = g.games                       # game id in the level_seeds slot
-        dones[t] = g.misses > prev_misses or g.board != prev_board or g.games != prev_games
+        level_seeds[t] = g.board                       # board id in the level_seeds slot (scene reset marker)
+        dones[t] = g.misses > prev_misses or g.board != prev_board
 
     return frames, actions, dones, level_seeds
 
@@ -91,8 +75,7 @@ def _worker(args: tuple) -> list[dict]:
     ep_idx = 0
     while written < n_frames:
         n = min(episode_size, n_frames - written)
-        bot_cls = HeuristicBot if (worker_id + ep_idx) % 2 == 1 else RandomBot
-        frames, actions, dones, level_seeds = collect_episode(seed + ep_idx, n, bot_cls=bot_cls)
+        frames, actions, dones, level_seeds = collect_episode(seed + ep_idx, n, bot_cls=RandomBot)
         if episode_size >= n_frames:
             shard_name = f"ep_{worker_id:03d}.npz.zst"
         else:
@@ -107,7 +90,7 @@ def _worker(args: tuple) -> list[dict]:
             "length":          int(n),
             "n_dones":         int(dones.sum()),
             "n_level_changes": n_level_changes,
-            "bot_type":        bot_cls.__name__,
+            "bot_type":        RandomBot.__name__,
             "worker_id":       int(worker_id),
             "split":           "val" if worker_id % 20 == 0 else "train",
         })
