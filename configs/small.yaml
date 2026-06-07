@@ -19,19 +19,20 @@ dit:
   depth: 12
   heads: 8                 # head_dim = 32
   head_dim: 32
-  patch_size: 2            # 48 spatial tok/frame
+  patch_size: 4            # 256x192 latent 24x32 / 4 = 48 spatial tok/frame (R4/R5 validated; patch 2 = 192 = M6-shaky)
   context_frames: 8        # double tiny -- longer temporal memory
   num_actions: 3          # NONE/LEFT/RIGHT (Breakout, D018)
   mlp_ratio: 4
 
 diffusion:
-  sigma_data: 2.23         # LPIPS vae_small latents 2026-06-01 (~6.3M scalars); L1 vae was 1.96
+  sigma_data: 2.54         # measured on new small-VAE latents (2026-06-05, D022 game); was 2.23 (old game)
   sigma_min: 0.002
   sigma_max: 80.0
   rho: 7.0
   p_mean: -0.4
   p_std: 1.0
   forcing: true
+  motion_weight: 15        # R5: up-weight moving regions so the ball can't static-collapse (mw=15 winner)
   num_sample_steps: 16
 
 training:
