@@ -33,6 +33,11 @@ class EDMDiffusion(nn.Module):
         # IMPERFECT history instead of assuming a clean past -> fixes the ball-fade/drift (DIAMOND/GameNGen).
         self.context_noise_min = float(cfg.get("context_noise_min", 0.01))
         self.context_noise_max = float(cfg.get("context_noise_max", 0.0))   # 0 = off (old full-DF behavior)
+        # static-consistency (D025): >0 strongly nails the target-frame regions that DON'T move vs the previous
+        # frame (idle bricks/background) so they stay constant instead of flickering every frame. static_thresh
+        # = the per-frame-normalized motion below which a region counts as static.
+        self.static_weight = float(cfg.get("static_weight", 0.0))
+        self.static_thresh = float(cfg.get("static_thresh", 0.1))
 
     def sample_sigma(self, B: int, T: int, device) -> torch.Tensor:
         # log-σ ~ N(P_mean, P_std). Diffusion Forcing (D002): per-frame (B, T).
@@ -97,6 +102,13 @@ class EDMDiffusion(nn.Module):
             loss = weighted[:, -1].mean()
         else:
             loss = weighted.mean()
+        if self.static_weight > 0 and T > 1:
+            # static-consistency (D025): up-weight the target frame's STATIC regions (no motion vs the previous
+            # frame) so idle bricks/background are nailed and don't flicker -- only moving/touched regions change.
+            mot = (x_clean[:, -1] - x_clean[:, -2]).abs().mean(dim=1, keepdim=True)   # (B, 1, H, W)
+            mot_norm = mot / (mot.amax(dim=(2, 3), keepdim=True) + 1e-6)
+            static = (mot_norm < self.static_thresh).float()
+            loss = loss + self.static_weight * (static * (D[:, -1] - x_clean[:, -1]) ** 2).mean()
         return loss, {
             "sigma_mean": float(sigma.mean().detach()),
             "sigma_std":  float(sigma.std().detach()),

@@ -13,14 +13,14 @@ import pathlib
 import numpy as np
 import zstandard as zstd
 
-from game import Game, H, W
+from game import Game, H, W, PADDLE_W, BALL_SIZE
 
 
 class RandomBot:
     # action prior -- {NONE, LEFT, RIGHT}; paddle moves 80% of frames in decisive 3-8 frame holds.
     # 100% random (no ball-tracking) so the paddle's motion is decorrelated from the ball: the model
     # can only explain paddle motion via the action, not "follow the ball" (the M7 control bug -- see
-    # docs/TASKS.md CURRENT STATUS). This is the entire data half of the control fix.
+    # docs/TASKS.md CURRENT STATUS). This is the dominant (80%) policy -- the data half of the control fix.
     PROBS = np.array([0.2, 0.4, 0.4])
 
     def __init__(self, rng: np.random.Generator):
@@ -34,6 +34,25 @@ class RandomBot:
             self.held_remaining = int(self.rng.integers(3, 9))   # 3..8 inclusive
         self.held_remaining -= 1
         return self.current
+
+
+class TrackingBot:
+    # ball-follower: nudge the paddle so its center sits under the ball -> produces real paddle-ball RALLIES
+    # the random policy almost never generates (~1% contact). Used for only ~20% of episodes (D026) so the
+    # paddle-follows-ball shortcut stays diluted (the M7 bug was 50% tracking); the action still drives it.
+    def __init__(self, rng: np.random.Generator):
+        self.rng = rng
+
+    def act(self, g: Game) -> int:
+        if self.rng.random() < 0.1:                  # occasional random move -> off-ball paddle positions too
+            return int(self.rng.integers(0, 3))
+        paddle_c = g.paddle_x + PADDLE_W / 2
+        ball_c = g.ball.x + BALL_SIZE / 2
+        if ball_c < paddle_c - 2:
+            return 1
+        if ball_c > paddle_c + 2:
+            return 2
+        return 0
 
 
 def collect_episode(seed: int, n_frames: int, bot_cls=RandomBot
@@ -75,7 +94,9 @@ def _worker(args: tuple) -> list[dict]:
     ep_idx = 0
     while written < n_frames:
         n = min(episode_size, n_frames - written)
-        frames, actions, dones, level_seeds = collect_episode(seed + ep_idx, n, bot_cls=RandomBot)
+        # 80% random / 20% ball-tracking (D026): deterministic 1-in-5 so episodes are reproducible.
+        bot_cls = TrackingBot if (worker_id + ep_idx) % 5 == 0 else RandomBot
+        frames, actions, dones, level_seeds = collect_episode(seed + ep_idx, n, bot_cls=bot_cls)
         if episode_size >= n_frames:
             shard_name = f"ep_{worker_id:03d}.npz.zst"
         else:
@@ -90,7 +111,7 @@ def _worker(args: tuple) -> list[dict]:
             "length":          int(n),
             "n_dones":         int(dones.sum()),
             "n_level_changes": n_level_changes,
-            "bot_type":        RandomBot.__name__,
+            "bot_type":        bot_cls.__name__,
             "worker_id":       int(worker_id),
             "split":           "val" if worker_id % 20 == 0 else "train",
         })

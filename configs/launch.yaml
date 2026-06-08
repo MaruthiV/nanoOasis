@@ -23,11 +23,11 @@ dit:
   patch_size: 4            # 256x192 latent 24x32 / 4 = 48 spatial tok/frame (R4/R5 validated; patch 2 = 192 = M6-shaky)
   context_frames: 8        # M3: ctx8 matches ctx16 at ~2.7x less compute
   num_actions: 3          # NONE/LEFT/RIGHT (Breakout, D018)
+  action_mode: concat     # D023: action as a token (M4) -- ~2x stronger paddle response than AdaLN-add
   mlp_ratio: 4
 
 diffusion:
-  # measured 2026-06-04 on the actual launch latents (data/full_latents, vae_launch.pt): std = 2.88.
-  # (the prior 2.44 was the small VAE's latents -- training EDM at the wrong scale is the H003 hazard.)
+  # RE-MEASURE on the new eased-game launch latents before the DiT run (old 2.88 was M7's data; H003 hazard).
   sigma_data: 2.88
   sigma_min: 0.002
   sigma_max: 80.0
@@ -36,6 +36,8 @@ diffusion:
   p_std: 1.0
   forcing: true
   motion_weight: 15.0      # R5: up-weight the moving region (the ball) so the DiT can't static-collapse
+  context_noise_min: 0.01  # D024: train context frames at low noise (matches inference) so the model learns
+  context_noise_max: 0.2   # to predict from its own imperfect history -> the validated ball-persistence fix
   num_sample_steps: 16
 
 training:
