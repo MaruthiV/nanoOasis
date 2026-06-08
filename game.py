@@ -13,13 +13,14 @@ SCALE = 2
 W, H = 128 * SCALE, 96 * SCALE
 NUM_ACTIONS = 3  # NONE, LEFT, RIGHT
 
-# paddle + ball physics per 30fps frame. Ball + paddle are bold (>= 1.5 VAE tiles) so they render
-# crisply through the 8px-tile VAE -- the rework's clarity fix (see docs/TASKS.md CURRENT STATUS).
+# paddle + ball physics per 30fps frame. The ball is big (24px ~ one DiT patch-4 token of 32px) so the
+# DiT can resolve + place it -- B3 played as mush because a 12px ball was sub-token to the DiT (D023).
+# Slow too (3px/f) so the per-frame motion is gentle enough for the small model to predict.
 PADDLE_W, PADDLE_H = 24 * SCALE, 6 * SCALE
 PADDLE_Y = H - 8 * SCALE                # top y of the paddle row
 PADDLE_SPEED = 3.0 * SCALE
-BALL_SIZE = 6 * SCALE
-BALL_SPEED = 2.5 * SCALE                # constant magnitude; velocity is a unit vector * BALL_SPEED
+BALL_SIZE = 12 * SCALE                  # 24px -- near one DiT token (32px) so it's not a sub-token blur (D023)
+BALL_SPEED = 1.5 * SCALE                # 3px/f; slower = gentler dynamics for the small model (B3 over-flung to 9px)
 MAX_BOUNCE = 1.0                        # paddle english, radians off vertical at the paddle edge (dimensionless)
 
 # brick grid -- 8 cols x 6 rows spans the full width, below a small top margin

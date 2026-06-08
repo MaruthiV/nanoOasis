@@ -22,6 +22,7 @@ dit:
   patch_size: 4            # 256x192 latent 24x32 / 4 = 48 spatial tok/frame (R4/R5 validated; patch 2 = 192 = M6-shaky)
   context_frames: 8        # double tiny -- longer temporal memory
   num_actions: 3          # NONE/LEFT/RIGHT (Breakout, D018)
+  action_mode: concat     # B3-fix: action as a token (M4) -- ~2x stronger paddle response than AdaLN-add (D023)
   mlp_ratio: 4
 
 diffusion:
