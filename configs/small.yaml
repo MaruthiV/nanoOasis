@@ -26,7 +26,7 @@ dit:
   mlp_ratio: 4
 
 diffusion:
-  sigma_data: 2.54         # measured on new small-VAE latents (2026-06-05, D022 game); was 2.23 (old game)
+  sigma_data: 2.45         # measured on the eased-game small-VAE latents (2026-06-07, D023 24px ball); was 2.54
   sigma_min: 0.002
   sigma_max: 80.0
   rho: 7.0
@@ -34,6 +34,8 @@ diffusion:
   p_std: 1.0
   forcing: true
   motion_weight: 15        # R5: up-weight moving regions so the ball can't static-collapse (mw=15 winner)
+  context_noise_min: 0.01  # D024: train context frames at low noise (matches inference sigma_stab) ...
+  context_noise_max: 0.2   # ... so the model learns to correct its own drift -> fixes ball-fade (DIAMOND/GameNGen)
   num_sample_steps: 16
 
 training:
