@@ -34,7 +34,7 @@ TIERS = {
     # episode_size: max frames per shard -- caps per-worker peak memory at episode_size * 36 KB
     "smoke":    {"frames":    10_000, "workers":  4, "episode_size":      0},   # 0 -> one shard / worker
     "baseline": {"frames":   500_000, "workers": 16, "episode_size":      0},
-    "full":     {"frames": 5_000_000, "workers": 16, "episode_size": 25_000},   # 13 shards / worker, ~900 MB buffer each
+    "full":     {"frames": 8_000_000, "workers": 16, "episode_size": 40_000},   # 8M (more runs, D026); ~208 shards
 }
 
 

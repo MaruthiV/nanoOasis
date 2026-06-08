@@ -89,24 +89,25 @@ def test_bot_random_stickiness_at_least_3():
 # ---- D5: parallel collection + parquet index ----
 
 
-def test_parallel_writes_n_shards_all_random(tmp_path):
+def test_parallel_writes_n_shards_8020_mix(tmp_path):
     import multiprocessing as mp
-    jobs = [(i, 200, str(tmp_path), i * 100_000) for i in range(4)]
-    with mp.Pool(4) as pool:
+    jobs = [(i, 200, str(tmp_path), i * 100_000) for i in range(5)]
+    with mp.Pool(5) as pool:
         worker_rows = pool.map(_worker, jobs)
     rows = [r for ws in worker_rows for r in ws]                # flatten worker -> shard rows
     write_index(rows, tmp_path / "index.parquet")
 
     shards = sorted(tmp_path.glob("ep_*.npz.zst"))
-    assert len(shards) == 4
+    assert len(shards) == 5
 
     import pyarrow.parquet as pq
     table = pq.read_table(tmp_path / "index.parquet")
-    assert table.num_rows == 4
+    assert table.num_rows == 5
     by_worker = {r["worker_id"]: r for r in table.to_pylist()}
-    assert set(by_worker.keys()) == {0, 1, 2, 3}
-    # every worker runs RandomBot now -- 100% random play (the control fix, see data_gen.py)
-    assert all(r["bot_type"] == "RandomBot" for r in by_worker.values())
+    assert set(by_worker.keys()) == {0, 1, 2, 3, 4}
+    # 80/20 random/tracking (D026): worker 0 (0 % 5 == 0) -> TrackingBot, the other four -> RandomBot
+    assert by_worker[0]["bot_type"] == "TrackingBot"
+    assert all(by_worker[w]["bot_type"] == "RandomBot" for w in (1, 2, 3, 4))
     # worker_id 0 -> "val" (0 % 20 == 0); others -> "train"
     assert by_worker[0]["split"] == "val"
     assert by_worker[1]["split"] == "train"

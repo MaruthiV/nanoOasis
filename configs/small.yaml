@@ -36,6 +36,8 @@ diffusion:
   motion_weight: 15        # R5: up-weight moving regions so the ball can't static-collapse (mw=15 winner)
   context_noise_min: 0.01  # D024: train context frames at low noise (matches inference sigma_stab) ...
   context_noise_max: 0.2   # ... so the model learns to correct its own drift -> fixes ball-fade (DIAMOND/GameNGen)
+  static_weight: 5.0       # D025: nail idle/static regions so bricks that aren't being hit stop flickering
+  static_thresh: 0.1       # motion below 10% of the per-frame max = "static"
   num_sample_steps: 16
 
 training:

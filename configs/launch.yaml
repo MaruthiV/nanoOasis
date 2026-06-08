@@ -38,6 +38,8 @@ diffusion:
   motion_weight: 15.0      # R5: up-weight the moving region (the ball) so the DiT can't static-collapse
   context_noise_min: 0.01  # D024: train context frames at low noise (matches inference) so the model learns
   context_noise_max: 0.2   # to predict from its own imperfect history -> the validated ball-persistence fix
+  static_weight: 5.0       # D025: nail idle/static regions so unhit bricks stop flickering every frame
+  static_thresh: 0.1       # motion below 10% of the per-frame max = "static"
   num_sample_steps: 16
 
 training:
@@ -47,7 +49,7 @@ training:
   betas: [0.9, 0.95]
   weight_decay: 0.0
   warmup_steps: 2000
-  total_steps: 100000
+  total_steps: 180000      # ~1.8x M7: with more/bigger data the model sees ~2.9M frames (vs M7's 1.6M) -> more runs
   grad_clip: 1.0
   ema_decay: 0.9999
   log_every: 100
