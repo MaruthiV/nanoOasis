@@ -38,8 +38,8 @@ TIERS = {
 }
 
 
-@app.function(image=image, cpu=16, memory=64 * 1024,
-              volumes={"/data": data_vol}, timeout=3 * 3600, retries=0)
+@app.function(image=image, cpu=16, memory=128 * 1024,   # 40k-frame episodes (D026) -> ~6 GB/worker x16; 64 GB OOMs
+              volumes={"/data": data_vol}, timeout=4 * 3600, retries=0)
 def gen_remote(tier: str = "smoke") -> None:
     import multiprocessing as mp
     import pathlib

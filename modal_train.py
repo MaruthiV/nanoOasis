@@ -100,7 +100,7 @@ def train_dit_remote(config_name: str = "tiny", smoke: bool = False, steps: int 
 
 
 @app.function(image=image, gpu="B200", volumes=VOLS, timeout=24 * 3600,
-              memory=200 * 1024,                  # hold all 195 train latent episodes (~120 GB) in RAM
+              memory=256 * 1024,                  # 8M latents (D026): 195 train episodes ~192 GB in RAM + headroom
               secrets=[modal.Secret.from_name("wandb")])
 def train_dit_launch() -> None:
     # single B200 (fastest single card; DDP skipped to avoid silent data-sharding bugs on the expensive run).
