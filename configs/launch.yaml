@@ -39,6 +39,8 @@ diffusion:
   context_noise_max: 0.2   # to predict from its own imperfect history -> the validated ball-persistence fix
   static_weight: 5.0       # D025: nail idle/static regions so unhit bricks stop flickering every frame
   static_thresh: 0.1       # motion below 10% of the per-frame max = "static"
+  static_region: 0.55      # D025·1: apply ONLY to the top 55% of rows (bricks) -- the whole-frame version froze
+                           # the ball's play area at the launch tier (ball died); bricks-only keeps the ball alive
   num_sample_steps: 16
 
 training:

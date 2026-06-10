@@ -38,6 +38,9 @@ class EDMDiffusion(nn.Module):
         # = the per-frame-normalized motion below which a region counts as static.
         self.static_weight = float(cfg.get("static_weight", 0.0))
         self.static_thresh = float(cfg.get("static_thresh", 0.1))
+        # confine the static loss to the TOP fraction of rows (the brick region) so it can't freeze the
+        # ball's lower play area (D025·1: the launch run over-stabilized -> ball died; bricks-only fixes it).
+        self.static_region = float(cfg.get("static_region", 1.0))   # 1.0 = whole frame; <1 = top rows only
 
     def sample_sigma(self, B: int, T: int, device) -> torch.Tensor:
         # log-σ ~ N(P_mean, P_std). Diffusion Forcing (D002): per-frame (B, T).
@@ -108,6 +111,9 @@ class EDMDiffusion(nn.Module):
             mot = (x_clean[:, -1] - x_clean[:, -2]).abs().mean(dim=1, keepdim=True)   # (B, 1, H, W)
             mot_norm = mot / (mot.amax(dim=(2, 3), keepdim=True) + 1e-6)
             static = (mot_norm < self.static_thresh).float()
+            if self.static_region < 1.0:                            # bricks-only: zero the mask below the brick rows
+                cut = int(x_clean.shape[3] * self.static_region)
+                static[:, :, cut:, :] = 0.0
             loss = loss + self.static_weight * (static * (D[:, -1] - x_clean[:, -1]) ** 2).mean()
         return loss, {
             "sigma_mean": float(sigma.mean().detach()),
