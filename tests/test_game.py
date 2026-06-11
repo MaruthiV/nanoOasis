@@ -22,17 +22,12 @@ def test_render_shape_and_dtype():
 
 
 def test_render_contains_paddle_ball_and_bricks():
-    g = Game(seed=0, palette="classic")
+    g = Game(seed=0, palette="grey")
     g.step(0)
     colors = {tuple(c) for c in g.render().reshape(-1, 3)}
     assert PADDLE_COLOR in colors
     assert BALL_COLOR in colors
-    assert DB16[PALETTE["classic"]["rows"][0]] in colors        # top brick row color
-
-
-def test_palettes_render_distinctly():
-    frames = {p: Game(seed=0, palette=p).render().tobytes() for p in PALETTES}
-    assert len(set(frames.values())) == len(PALETTES)
+    assert DB16[PALETTE["grey"]["rows"][0]] in colors        # top brick row color
 
 
 # ---- the property the pivot exists for: the ball moves every frame ----

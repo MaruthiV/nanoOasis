@@ -27,7 +27,7 @@ dit:
   mlp_ratio: 4
 
 diffusion:
-  sigma_data: 2.72         # measured 2026-06-09 on the new eased-game launch-VAE latents (was M7's 2.88)
+  sigma_data: 3.15         # measured 2026-06-10 on the grey-game launch-VAE latents (D027)
   sigma_min: 0.002
   sigma_max: 80.0
   rho: 7.0
@@ -37,10 +37,9 @@ diffusion:
   motion_weight: 15.0      # R5: up-weight the moving region (the ball) so the DiT can't static-collapse
   context_noise_min: 0.01  # D024: train context frames at low noise (matches inference) so the model learns
   context_noise_max: 0.2   # to predict from its own imperfect history -> the validated ball-persistence fix
-  static_weight: 5.0       # D025: nail idle/static regions so unhit bricks stop flickering every frame
-  static_thresh: 0.1       # motion below 10% of the per-frame max = "static"
-  static_region: 0.55      # D025·1: apply ONLY to the top 55% of rows (bricks) -- the whole-frame version froze
-                           # the ball's play area at the launch tier (ball died); bricks-only keeps the ball alive
+  static_weight: 1.0       # D027: dropped 5->1 -- weight 5 froze bricks so they wouldn't BREAK. A light touch
+  static_thresh: 0.1       # dampens idle flicker but lets the ball break bricks; lean on capacity + Heun for stability
+  static_region: 0.55      # still bricks-only (top 55% of rows), so it never touches the ball's play area
   num_sample_steps: 16
 
 training:
@@ -58,7 +57,7 @@ training:
   ckpt_every: 5000
 
 data:
-  # DiT trains on the pre-encoded 8M latents (D026). 195 train episodes x ~1 GB ~= 192 GB cached in RAM.
+  # DiT trains on the pre-encoded 8M grey latents (D027). ~195 train episodes cached in RAM.
   index_path: data/full_latents/index.parquet
   pre_encoded: true
-  cache_size: 220          # holds all 195 train latent episodes -> zero loader misses (needs ~256 GB host RAM)
+  cache_size: 220          # holds all train latent episodes (needs ~256 GB host RAM, set on train_dit_launch)

@@ -23,14 +23,14 @@ BALL_SIZE = 12 * SCALE                  # 24px -- near one DiT token (32px) so i
 BALL_SPEED = 1.5 * SCALE                # 3px/f; slower = gentler dynamics for the small model (B3 over-flung to 9px)
 MAX_BOUNCE = 1.0                        # paddle english, radians off vertical at the paddle edge (dimensionless)
 
-# brick grid -- 8 cols x 6 rows spans the full width, below a small top margin
-BRICK_W, BRICK_H = 16 * SCALE, 6 * SCALE
-BRICK_COLS, BRICK_ROWS = 8, 6
+# brick grid -- 6 cols x 4 rows: fewer + BIGGER bricks so each break is a large, learnable event (D027).
+BRICK_COLS, BRICK_ROWS = 6, 4
+BRICK_W, BRICK_H = W // BRICK_COLS, 9 * SCALE
 BRICK_TOP = 14 * SCALE
 BRICK_VALUE = 10
 
-# palette variety -- the Breakout analogue of biomes, gives the dataset visual diversity
-PALETTES = ("classic", "cave", "sky", "lava")
+# single grey palette (D027): one neutral scheme instead of 4 -> frees model capacity for the mechanics
+PALETTES = ("grey",)
 
 # DawnBringer 16 palette, indexed.
 DB16 = (
@@ -52,12 +52,9 @@ DB16 = (
     (0xde, 0xee, 0xd6),  # 15 off-white
 )
 
-# per palette: background index + the 6 brick-row colors (top row first)
+# single grey scheme: dark bg + 4 neutral brick-row shades (light -> dark), one per brick row.
 PALETTE = {
-    "classic": dict(bg=0,  rows=(6, 9, 14, 11, 13, 8)),
-    "cave":    dict(bg=0,  rows=(3, 10, 7, 12, 15, 13)),
-    "sky":     dict(bg=8,  rows=(15, 14, 9, 6, 1, 3)),
-    "lava":    dict(bg=1,  rows=(9, 6, 14, 4, 10, 15)),
+    "grey": dict(bg=0, rows=(15, 10, 7, 3)),
 }
 
 PADDLE_COLOR = DB16[10]

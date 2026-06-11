@@ -38,8 +38,10 @@ def edm_sigma_schedule(num_steps: int, sigma_min: float, sigma_max: float,
 @torch.no_grad()
 def sample_next_frame(diff: EDMDiffusion, z_ctx: torch.Tensor,
                       full_actions: torch.Tensor, sigmas: torch.Tensor,
-                      sigma_stab: float = 0.1) -> torch.Tensor:
-    # z_ctx: (B=1, T-1, C, Hp, Wp) clean context; full_actions: (T,) ints incl. the new action
+                      sigma_stab: float = 0.1, sampler: str = "heun") -> torch.Tensor:
+    # z_ctx: (B=1, T-1, C, Hp, Wp) clean context; full_actions: (T,) ints incl. the new action.
+    # sampler: "heun" = Karras EDM 2nd-order (deterministic, fewer mode-covering / ghosting artifacts; DIAMOND),
+    #          "euler" = 1st-order baseline.
     B = z_ctx.shape[0]
     T = z_ctx.shape[1] + 1
     C, Hp, Wp = z_ctx.shape[2:]
@@ -51,16 +53,22 @@ def sample_next_frame(diff: EDMDiffusion, z_ctx: torch.Tensor,
     noisy_ctx = z_ctx + sigma_stab * torch.randn_like(z_ctx)
     x_new = torch.randn(B, 1, C, Hp, Wp, device=device) * sigmas[0]
 
+    def deriv(x, sigma):                                       # score-like estimate at the new frame
+        sig = torch.cat([torch.full((B, T - 1), sigma_stab, device=device),
+                         torch.full((B, 1),     sigma,      device=device)], dim=1)
+        D = diff.denoise(torch.cat([noisy_ctx, x], dim=1), sig, full_actions)
+        return (x - D[:, -1:]) / sigma
+
     for i in range(len(sigmas) - 1):
         sigma_cur = float(sigmas[i])
         sigma_next = float(sigmas[i + 1])
-        sig = torch.cat([
-            torch.full((B, T - 1), sigma_stab, device=device),
-            torch.full((B, 1),     sigma_cur,  device=device),
-        ], dim=1)
-        D = diff.denoise(torch.cat([noisy_ctx, x_new], dim=1), sig, full_actions)
-        d = (x_new - D[:, -1:]) / sigma_cur                    # score-like estimate at the new frame
-        x_new = x_new + (sigma_next - sigma_cur) * d           # Euler step
+        d = deriv(x_new, sigma_cur)
+        x_euler = x_new + (sigma_next - sigma_cur) * d
+        if sampler == "heun" and sigma_next > 0:               # Karras EDM Alg. 1 -- 2nd-order correction
+            d2 = deriv(x_euler, sigma_next)
+            x_new = x_new + (sigma_next - sigma_cur) * 0.5 * (d + d2)
+        else:
+            x_new = x_euler
     return x_new
 
 
@@ -74,7 +82,7 @@ def decode_latent(vae: VAE, z: torch.Tensor) -> np.ndarray:
 
 @torch.no_grad()
 def initial_context(vae: VAE, T_ctx: int, seed: int, device: str):
-    g = Game(seed=seed, palette="classic")
+    g = Game(seed=seed, palette="grey")
     frames = [g.step(0)[0].copy() for _ in range(T_ctx)]
     flat = torch.from_numpy(np.stack(frames)).to(device)
     mu, _ = vae.encode(flat)
@@ -143,7 +151,7 @@ def measure_horizon(ckpt_path, vae_path, config_name, n_frames, num_steps, sigma
     torch.manual_seed(seed)
 
     # ground truth: T_ctx context frames (action 0, matching initial_context), then a fixed action sequence
-    g = Game(seed=seed, palette="classic")
+    g = Game(seed=seed, palette="grey")
     gt = [g.step(0)[0].copy() for _ in range(T_ctx)]
     cycle = [2, 2, 2, 2, 1, 1, 1, 1]                # sweep the paddle right then left (Breakout)
     action_seq = [cycle[i % len(cycle)] for i in range(n_frames)]
@@ -216,7 +224,7 @@ def plausibility(ckpt_path, vae_path, config_name, n_frames, num_steps, sigma_st
     T_ctx = cfg.dit.context_frames
     torch.manual_seed(seed)
 
-    pal = PALETTE["classic"]
+    pal = PALETTE["grey"]
     bg = np.array(DB16[pal["bg"]], dtype=int)
     row_colors = [np.array(DB16[i], dtype=int) for i in pal["rows"]]
 
