@@ -136,7 +136,32 @@ def _keys_to_action(up: bool, down: bool, left: bool, right: bool, current: int)
     return current
 
 
-def play(seed: int = 0) -> None:
+_KEY_DIRS = {}                                         # filled lazily; pygame keycode -> action
+
+
+def _poll_action(pygame, events, current: int) -> tuple[int, bool]:
+    # taps between slow ticks arrive as queued KEYDOWNs -- read those first so no input is dropped,
+    # then fall back to held keys, then keep the current heading. Returns (action, quit_requested).
+    if not _KEY_DIRS:
+        _KEY_DIRS.update({pygame.K_UP: UP, pygame.K_DOWN: DOWN,
+                          pygame.K_LEFT: LEFT, pygame.K_RIGHT: RIGHT})
+    tapped, quit_req = None, False
+    for ev in events:
+        if ev.type == pygame.QUIT:
+            quit_req = True
+        elif ev.type == pygame.KEYDOWN:
+            if ev.key == pygame.K_ESCAPE:
+                quit_req = True
+            elif ev.key in _KEY_DIRS:
+                tapped = _KEY_DIRS[ev.key]             # latest tap wins
+    if tapped is not None:
+        return tapped, quit_req
+    keys = pygame.key.get_pressed()
+    return _keys_to_action(keys[pygame.K_UP], keys[pygame.K_DOWN],
+                           keys[pygame.K_LEFT], keys[pygame.K_RIGHT], current), quit_req
+
+
+def play(seed: int = 0, fps: int = 4) -> None:
     import pygame
     pygame.init()
     up_scale = max(1, 512 // W)
@@ -148,21 +173,15 @@ def play(seed: int = 0) -> None:
     action = UP
     running = True
     while running:
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                running = False
-            elif event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
-                running = False
-
-        keys = pygame.key.get_pressed()
-        action = _keys_to_action(keys[pygame.K_UP], keys[pygame.K_DOWN],
-                                 keys[pygame.K_LEFT], keys[pygame.K_RIGHT], action)
+        action, quit_req = _poll_action(pygame, pygame.event.get(), action)
+        if quit_req:
+            break
         frame, _, _ = game.step(action)
         # pygame.surfarray uses (W, H, 3); see BUGS.md H005
         surf = pygame.surfarray.make_surface(np.transpose(frame, (1, 0, 2)))
         screen.blit(pygame.transform.scale(surf, (W * up_scale, H * up_scale)), (0, 0))
         pygame.display.flip()
-        clock.tick(7)                                  # tick = one cell move; ~7 cells/s is classic Snake speed
+        clock.tick(fps)                                # tick = one cell move; 4/s per user play-test (7 was too fast)
 
     pygame.quit()
 
@@ -185,9 +204,12 @@ if __name__ == "__main__":
         print(f"wrote assets/preview_snake.png + strip (eats={g.eats}, deaths={g.deaths})")
     elif "--play" in sys.argv:
         seed = 0
+        fps = 4
         if "--seed" in sys.argv:
             seed = int(sys.argv[sys.argv.index("--seed") + 1])
-        play(seed=seed)
+        if "--fps" in sys.argv:
+            fps = int(sys.argv[sys.argv.index("--fps") + 1])
+        play(seed=seed, fps=fps)
     else:
-        print("usage: python game.py --play [--seed N]   # interactive upscaled window")
-        print("       python game.py --preview           # write assets/preview_snake*.png")
+        print("usage: python game.py --play [--seed N] [--fps N]   # interactive upscaled window")
+        print("       python game.py --preview                     # write assets/preview_snake*.png")

@@ -14,7 +14,7 @@ from omegaconf import OmegaConf
 from vae import VAE
 from model import DiT
 from diffusion import EDMDiffusion
-from game import (Game, _keys_to_action, safe_actions, W, H, CELL, GRID_COLS, GRID_ROWS,
+from game import (Game, _poll_action, safe_actions, W, H, CELL, GRID_COLS, GRID_ROWS,
                   DIRS, UP, DOWN, LEFT, RIGHT, BG_COLOR, BODY_COLOR, HEAD_COLOR, APPLE_COLOR)
 
 # fixed exploratory direction cycle for headless rollouts (a box sweep)
@@ -340,7 +340,8 @@ def action_test(ckpt_path, vae_path, config_name, num_steps, sigma_stab, seed, o
     iio.imwrite(out_dir / "action_test.png", np.concatenate(frames, axis=1))
 
 
-def play(ckpt_path, vae_path, config_name, num_steps, sigma_stab, seed, sampler="euler", sigma_max=0.0):
+def play(ckpt_path, vae_path, config_name, num_steps, sigma_stab, seed, sampler="euler", sigma_max=0.0,
+         fps: int = 4):
     import pygame
     device = pick_device("auto")
     cfg, vae, diff = load_models(ckpt_path, vae_path, config_name, device)
@@ -357,15 +358,9 @@ def play(ckpt_path, vae_path, config_name, num_steps, sigma_stab, seed, sampler=
     action = actions[-1]
     running = True
     while running:
-        for ev in pygame.event.get():
-            if ev.type == pygame.QUIT:
-                running = False
-            elif ev.type == pygame.KEYDOWN and ev.key == pygame.K_ESCAPE:
-                running = False
-
-        keys = pygame.key.get_pressed()
-        action = _keys_to_action(keys[pygame.K_UP], keys[pygame.K_DOWN],
-                                 keys[pygame.K_LEFT], keys[pygame.K_RIGHT], action)
+        action, quit_req = _poll_action(pygame, pygame.event.get(), action)
+        if quit_req:
+            break
 
         z_ctx = z_history[:, 1:]
         full_actions = torch.tensor(actions[1:] + [action], dtype=torch.long, device=device)
@@ -377,7 +372,7 @@ def play(ckpt_path, vae_path, config_name, num_steps, sigma_stab, seed, sampler=
         surf = pygame.surfarray.make_surface(np.transpose(frame, (1, 0, 2)))   # H005: surfarray is (W,H,3)
         screen.blit(pygame.transform.scale(surf, (W * 4, H * 4)), (0, 0))
         pygame.display.flip()
-        clock.tick(7)                                  # tick = one cell move; classic Snake cadence (D029)
+        clock.tick(fps)                                # tick = one cell move; 4/s per user play-test (D029)
 
     pygame.quit()
 
@@ -391,6 +386,7 @@ if __name__ == "__main__":
     p.add_argument("--sampler", type=str, default="euler", choices=["euler", "heun"])
     p.add_argument("--sigma-max", type=float, default=0.0, help="sampling sigma_max; 0 = 10x sigma_data (D029)")
     p.add_argument("--sigma-stab", type=float, default=0.1)
+    p.add_argument("--fps", type=int, default=4, help="play-mode tick rate (cells/s)")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--headless", type=int, default=0, help="write N frames + strip.png, no window")
     p.add_argument("--measure-horizon", type=int, default=0, help="short-horizon exact-MSE drift vs the real game")
@@ -413,4 +409,4 @@ if __name__ == "__main__":
                  args.steps, args.sigma_stab, args.seed, args.out, args.sampler, args.sigma_max)
     else:
         play(args.ckpt, args.vae, args.config, args.steps, args.sigma_stab, args.seed,
-             args.sampler, args.sigma_max)
+             args.sampler, args.sigma_max, args.fps)
