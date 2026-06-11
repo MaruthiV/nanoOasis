@@ -47,15 +47,16 @@ training:
   lr: 1.0e-4
   betas: [0.9, 0.95]
   weight_decay: 0.0
-  warmup_steps: 1000
-  total_steps: 100000      # full small VAE; trial overrides via --steps
+  warmup_steps: 100
+  total_steps: 3000      # overfit proof: ~50 epochs over the 2k fixed frames
   grad_clip: 1.0
   ema_decay: 0.9999
   log_every: 100
   val_every: 2500
-  ckpt_every: 5000
+  ckpt_every: 1500
 
 data:
-  index_path: data/baseline/index.parquet
-  cache_size: 64
+  index_path: data/overfit/index.parquet
+  cache_size: 4
   event_frac: 0.4          # D029: 40% of DiT windows end on an eat/death so the model commits to events
+vae_ckpt: checkpoints/vae_small.pt   # overfit tier reuses the Gate-1 VAE

@@ -119,7 +119,9 @@ def load_models(ckpt_path: str, vae_path: str, config_name: str, device: str):
 
     model = DiT(cfg.dit).to(device).eval()
     ckpt = torch.load(ckpt_path, weights_only=False, map_location=device)
-    model.load_state_dict(ckpt.get("ema", ckpt["model"]))
+    # EMA(0.9999) needs ~30k+ steps to forget the init; short runs must eval RAW weights (overfit-gate lesson)
+    use_ema = not os.environ.get("NANO_RAW_WEIGHTS")
+    model.load_state_dict(ckpt.get("ema", ckpt["model"]) if use_ema else ckpt["model"])
     for p in model.parameters():
         p.requires_grad = False
 

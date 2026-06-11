@@ -31,8 +31,8 @@ diffusion:
   sigma_min: 0.002
   sigma_max: 80.0
   rho: 7.0
-  p_mean: -0.4
-  p_std: 1.0
+  p_mean: 1.44           # ln(1.34 x sigma_data 3.15) -- rescale when sigma_data is re-measured (B002)
+  p_std: 1.2             # DIAMOND's width
   forcing: true
   motion_weight: 5         # mild (D029): changed cells are whole tokens now
   context_noise_min: 0.002 # D024/D029: context trained at UNIFORM noise up to ~0.5 x sigma_data
