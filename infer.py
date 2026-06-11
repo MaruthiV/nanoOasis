@@ -69,6 +69,8 @@ def sample_next_frame(diff: EDMDiffusion, z_ctx: torch.Tensor,
             x_new = x_new + (sigma_next - sigma_cur) * 0.5 * (d + d2)
         else:
             x_new = x_euler
+    if device.type == "mps":
+        torch.mps.empty_cache()                                # free per-frame so long Heun rollouts don't OOM
     return x_new
 
 
