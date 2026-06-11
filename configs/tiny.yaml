@@ -18,14 +18,15 @@ dit:
   depth: 4
   heads: 4                 # head_dim = 32
   head_dim: 32
-  patch_size: 2            # 16/2 x 12/2 = 8 x 6 = 48 spatial tokens per frame
+  patch_size: 4            # latent 24x32 / 4 = 8x6 = 48 tokens = the Snake grid (1 cell = 1 token, D028)
   context_frames: 4        # past frames the model conditions on (tiny tier)
-  num_actions: 3          # NONE/LEFT/RIGHT (Breakout, D018)
+  num_actions: 4          # UP/DOWN/LEFT/RIGHT, absolute (Snake, D028)
+  action_mode: concat     # dual path (D029): action token + AdaLN-add together
   mlp_ratio: 4
 
 diffusion:
   # EDM preconditioning -- DECISIONS.md D001
-  sigma_data: 0.5          # placeholder; V4 measures the real value on trained VAE latents
+  sigma_data: 0.5          # placeholder; measure the real value on trained VAE latents
   sigma_min: 0.002
   sigma_max: 80.0
   rho: 7.0
@@ -34,7 +35,11 @@ diffusion:
   p_std: 1.0
   # diffusion forcing per-frame sigma -- DECISIONS.md D002
   forcing: true
-  num_sample_steps: 16     # teacher; LCM distill to 2 in Phase 6
+  motion_weight: 5         # mild changed-cell up-weight (D029)
+  context_noise_min: 0.002 # D024/D029: context trained at uniform noise up to ~0.5 x sigma_data
+  context_noise_max: 0.25
+  action_dropout: 0.1      # D029: CFG-on-action option
+  num_sample_steps: 4      # Euler few-step (D029)
 
 training:
   device: auto             # cuda > mps > cpu auto-detect at runtime
@@ -53,3 +58,4 @@ training:
 data:
   index_path: data/smoke/index.parquet
   cache_size: 32
+  event_frac: 0.4          # D029: 40% of DiT windows end on an eat/death

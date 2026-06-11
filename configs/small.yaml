@@ -19,26 +19,27 @@ dit:
   depth: 12
   heads: 8                 # head_dim = 32
   head_dim: 32
-  patch_size: 4            # 256x192 latent 24x32 / 4 = 48 spatial tok/frame (R4/R5 validated; patch 2 = 192 = M6-shaky)
+  patch_size: 4            # 256x192 latent 24x32 / 4 = 48 spatial tok/frame = the 8x6 Snake grid (1 cell = 1 token)
   context_frames: 8        # double tiny -- longer temporal memory
-  num_actions: 3          # NONE/LEFT/RIGHT (Breakout, D018)
-  action_mode: concat     # B3-fix: action as a token (M4) -- ~2x stronger paddle response than AdaLN-add (D023)
+  num_actions: 4          # UP/DOWN/LEFT/RIGHT, absolute (Snake, D028)
+  action_mode: concat     # dual path (D029): action token (M4) + AdaLN-add together
   mlp_ratio: 4
 
 diffusion:
-  sigma_data: 2.45         # measured on the eased-game small-VAE latents (2026-06-07, D023 24px ball); was 2.54
+  sigma_data: 2.45         # Breakout value -- RE-MEASURE on the Snake small-VAE latents (Gate 1) before the DiT
   sigma_min: 0.002
   sigma_max: 80.0
   rho: 7.0
   p_mean: -0.4
   p_std: 1.0
   forcing: true
-  motion_weight: 15        # R5: up-weight moving regions so the ball can't static-collapse (mw=15 winner)
-  context_noise_min: 0.01  # D024: train context frames at low noise (matches inference sigma_stab) ...
-  context_noise_max: 0.2   # ... so the model learns to correct its own drift -> fixes ball-fade (DIAMOND/GameNGen)
-  static_weight: 5.0       # D025: nail idle/static regions so bricks that aren't being hit stop flickering
-  static_thresh: 0.1       # motion below 10% of the per-frame max = "static"
-  num_sample_steps: 16
+  motion_weight: 5         # mild (D029): changed cells are whole tokens now; 15 was compensating for a sub-token ball
+  context_noise_min: 0.002 # D024/D029: train context frames at UNIFORM noise up to ~0.5 x sigma_data
+  context_noise_max: 1.2   # (GameNGen corrupts up to ~70% of data std; old 0.2 was ~10x too weak) -- re-set after Gate 1
+  static_weight: 0.0       # off (D029): DIAMOND ships plain uniform MSE; reserve lever if idle cells flicker
+  static_thresh: 0.1       # only used if static_weight > 0
+  action_dropout: 0.1      # D029: null-action windows -> classifier-free guidance on action available at inference
+  num_sample_steps: 4      # Euler 3-4 steps is the DIAMOND-proven regime (D029); sampling sigma_max = 10 x sigma_data
 
 training:
   device: auto
@@ -57,3 +58,4 @@ training:
 data:
   index_path: data/baseline/index.parquet
   cache_size: 64
+  event_frac: 0.4          # D029: 40% of DiT windows end on an eat/death so the model commits to events

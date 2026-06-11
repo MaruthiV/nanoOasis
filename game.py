@@ -1,36 +1,20 @@
-# nanoOasis Breakout. Deterministic, headless-friendly, single-screen (256x192 at SCALE=2; D021).
-# Pivoted from a platformer (DECISIONS D018): the platformer was ~99.6% static per frame, so the
-# world model had no dynamics to learn (M1 horizon-2x = 1, see EXPERIMENTS). Breakout keeps a ball
-# moving every frame -- the regime DIAMOND models on Atari -- while staying single-screen (D017 holds).
+# nanoOasis Snake. Deterministic, headless-friendly, grid-native (DECISIONS D028/D029).
+# Pivoted from Breakout: its small fast *continuous* ball + *rare* discrete brick-breaks fought the
+# DiT's coarse tokens across 3 launch runs (the static_weight tradeoff, D028). Snake is designed so
+# 1 game cell = 1 DiT token (32px cell = VAE patch 8 x DiT patch 4): no sub-token objects, discrete
+# one-cell-per-frame motion, frequent eat/grow events. Full design: docs/SNAKE_DESIGN.md.
 
-from dataclasses import dataclass
 import numpy as np
 
-# SCALE multiplies the base 128x96 game so the ball clears the VAE's 8px tile (DECISIONS D021).
-# SCALE=1 is the original 128x96; SCALE=2 -> 256x192 with an 8px ball. Everything below is base*SCALE
-# so proportions + feel are identical at any scale. Bump SCALE if the ball still needs more tiles.
-SCALE = 2
-W, H = 128 * SCALE, 96 * SCALE
-NUM_ACTIONS = 3  # NONE, LEFT, RIGHT
+W, H = 256, 192                      # frame size -- VAE/DiT derive their grids from this (D021)
+GRID_COLS, GRID_ROWS = 8, 6          # 8x6 cells of 32px = exactly the DiT's 48-token grid
+CELL = W // GRID_COLS                # 32px (== H // GRID_ROWS)
+GAP = 2                              # px inset per cell side -> visible grid separation
+NUM_ACTIONS = 4                      # absolute headings; no NONE -- the snake always moves
 
-# paddle + ball physics per 30fps frame. The ball is big (24px ~ one DiT patch-4 token of 32px) so the
-# DiT can resolve + place it -- B3 played as mush because a 12px ball was sub-token to the DiT (D023).
-# Slow too (3px/f) so the per-frame motion is gentle enough for the small model to predict.
-PADDLE_W, PADDLE_H = 24 * SCALE, 6 * SCALE
-PADDLE_Y = H - 8 * SCALE                # top y of the paddle row
-PADDLE_SPEED = 3.0 * SCALE
-BALL_SIZE = 12 * SCALE                  # 24px -- near one DiT token (32px) so it's not a sub-token blur (D023)
-BALL_SPEED = 1.5 * SCALE                # 3px/f; slower = gentler dynamics for the small model (B3 over-flung to 9px)
-MAX_BOUNCE = 1.0                        # paddle english, radians off vertical at the paddle edge (dimensionless)
-
-# brick grid -- 6 cols x 4 rows: fewer + BIGGER bricks so each break is a large, learnable event (D027).
-BRICK_COLS, BRICK_ROWS = 6, 4
-BRICK_W, BRICK_H = W // BRICK_COLS, 9 * SCALE
-BRICK_TOP = 14 * SCALE
-BRICK_VALUE = 10
-
-# single grey palette (D027): one neutral scheme instead of 4 -> frees model capacity for the mechanics
-PALETTES = ("grey",)
+UP, DOWN, LEFT, RIGHT = 0, 1, 2, 3
+DIRS = ((0, -1), (0, 1), (-1, 0), (1, 0))    # (dcol, drow) per action
+_REVERSE = (DOWN, UP, RIGHT, LEFT)
 
 # DawnBringer 16 palette, indexed.
 DB16 = (
@@ -52,144 +36,116 @@ DB16 = (
     (0xde, 0xee, 0xd6),  # 15 off-white
 )
 
-# single grey scheme: dark bg + 4 neutral brick-row shades (light -> dark), one per brick row.
-PALETTE = {
-    "grey": dict(bg=0, rows=(15, 10, 7, 3)),
-}
+BG_COLOR = DB16[0]
+BODY_COLOR = DB16[10]                # mid grey
+HEAD_COLOR = DB16[15]                # brightest -- heading must be legible to model + player
+APPLE_COLOR = DB16[6]                # the one red accent (SNAKE_DESIGN decision 2)
 
-PADDLE_COLOR = DB16[10]
-BALL_COLOR = DB16[15]
-
-
-@dataclass
-class Ball:
-    x: float        # left edge px
-    y: float        # top edge px
-    vx: float
-    vy: float
+START_LEN = 3
 
 
 class Game:
-    def __init__(self, seed: int = 0, palette: str | None = None):
+    def __init__(self, seed: int = 0):
         self.rng = np.random.default_rng(seed)
         self.seed = int(seed)
-        self.palette = palette or PALETTES[int(self.rng.integers(0, len(PALETTES)))]
-        self.score = 0
-        self.misses = 0                                 # total balls lost (monotonic); ball relaunches at once
-        self.board = 0                                  # boards cleared (monotonic)
-        self.paddle_x = float((W - PADDLE_W) / 2)
-        self.bricks = np.ones((BRICK_ROWS, BRICK_COLS), dtype=bool)
-        self._launch_ball()
+        self.eats = 0                                  # total apples eaten (monotonic)
+        self.deaths = 0                                # total deaths (monotonic; scene-reset marker)
+        self._spawn_snake()
+        self.apple = self._spawn_apple()
 
-    def _launch_ball(self) -> None:
-        # ball starts just above the paddle, heading up at a shallow random angle
-        angle = float(self.rng.uniform(-0.6, 0.6))
-        self.ball = Ball(
-            x=self.paddle_x + PADDLE_W / 2 - BALL_SIZE / 2,
-            y=float(PADDLE_Y - BALL_SIZE - 1),
-            vx=BALL_SPEED * float(np.sin(angle)),
-            vy=-BALL_SPEED * float(np.cos(angle)),
-        )
+    def _spawn_snake(self) -> None:
+        c, r = GRID_COLS // 2, GRID_ROWS // 2 - 1      # head at (4, 2), body trailing down
+        self.body = [(c, r + i) for i in range(START_LEN)]   # head first
+        self.heading = UP
+        self.score = 0                                 # apples this life
 
-    def _bounce_off_paddle(self, b: Ball) -> None:
-        # bounce angle depends on where the ball hits the paddle -- classic Breakout english
-        offset = ((b.x + BALL_SIZE / 2) - (self.paddle_x + PADDLE_W / 2)) / (PADDLE_W / 2)
-        angle = float(np.clip(offset, -1.0, 1.0)) * MAX_BOUNCE
-        b.vx = BALL_SPEED * float(np.sin(angle))
-        b.vy = -BALL_SPEED * float(np.cos(angle))
-        b.y = PADDLE_Y - BALL_SIZE
+    def _spawn_apple(self) -> tuple[int, int]:
+        occupied = set(self.body)
+        empty = [(c, r) for r in range(GRID_ROWS) for c in range(GRID_COLS) if (c, r) not in occupied]
+        return empty[int(self.rng.integers(0, len(empty)))]
 
-    def _hit_bricks(self, b: Ball) -> None:
-        # cell under the ball center; destroy it, score, reflect vertically
-        col = int((b.x + BALL_SIZE / 2) // BRICK_W)
-        row = int((b.y + BALL_SIZE / 2 - BRICK_TOP) // BRICK_H)
-        if 0 <= row < BRICK_ROWS and 0 <= col < BRICK_COLS and self.bricks[row, col]:
-            self.bricks[row, col] = False
-            self.score += BRICK_VALUE
-            b.vy = -b.vy
-            # nudge clear of the brick band so we don't re-hit the same cell next frame
-            b.y = BRICK_TOP + (row + 1) * BRICK_H if b.vy > 0 else BRICK_TOP + row * BRICK_H - BALL_SIZE
+    def _reset(self) -> None:
+        self.deaths += 1
+        self._spawn_snake()
+        self.apple = self._spawn_apple()
 
     def step(self, action: int) -> tuple[np.ndarray, float, bool]:
-        if action == 1:
-            self.paddle_x -= PADDLE_SPEED
-        elif action == 2:
-            self.paddle_x += PADDLE_SPEED
-        self.paddle_x = float(np.clip(self.paddle_x, 0, W - PADDLE_W))
+        # one tick per frame: the head advances exactly one cell. `done` marks eat OR death --
+        # event markers the loader oversamples (D029), not episode boundaries.
+        if action != _REVERSE[self.heading]:           # direct reversal is ignored, classic Snake
+            self.heading = int(action)
+        dc, dr = DIRS[self.heading]
+        hc, hr = self.body[0]
+        nh = (hc + dc, hr + dr)
 
-        b = self.ball
-        b.x += b.vx
-        b.y += b.vy
+        if not (0 <= nh[0] < GRID_COLS and 0 <= nh[1] < GRID_ROWS):
+            self._reset()                              # wall -> death + instant respawn (no game-over screen)
+            return self.render(), 0.0, True
 
-        # side + top walls reflect
-        if b.x <= 0:
-            b.x = 0.0
-            b.vx = -b.vx
-        elif b.x + BALL_SIZE >= W:
-            b.x = W - BALL_SIZE
-            b.vx = -b.vx
-        if b.y <= 0:
-            b.y = 0.0
-            b.vy = -b.vy
+        eat = nh == self.apple
+        trunk = self.body if eat else self.body[:-1]   # tail vacates first unless growing -> tail-chase is legal
+        if nh in trunk:
+            self._reset()                              # self-collision -> death + instant respawn
+            return self.render(), 0.0, True
 
-        # paddle reflect (only while descending into the paddle row)
-        if (b.vy > 0 and PADDLE_Y <= b.y + BALL_SIZE <= PADDLE_Y + PADDLE_H
-                and b.x + BALL_SIZE > self.paddle_x and b.x < self.paddle_x + PADDLE_W):
-            self._bounce_off_paddle(b)
+        self.body = [nh] + trunk
+        if eat:
+            self.score += 1
+            self.eats += 1
+            if len(self.body) == GRID_COLS * GRID_ROWS:   # board full -- won; fresh game
+                self._reset()
+                return self.render(), 1.0, True
+            self.apple = self._spawn_apple()
+        return self.render(), float(eat), eat
 
-        self._hit_bricks(b)
-
-        if b.y >= H:                                    # ball lost -> relaunch at once (no lives, always in play)
-            self.misses += 1
-            self.paddle_x = float((W - PADDLE_W) / 2)
-            self._launch_ball()
-
-        if not self.bricks.any():                       # board cleared -> fresh board
-            self.board += 1
-            self.bricks = np.ones((BRICK_ROWS, BRICK_COLS), dtype=bool)
-            self._launch_ball()
-
-        return self.render(), 0.0, False
+    @staticmethod
+    def _cell(fb: np.ndarray, c: int, r: int, color: tuple) -> None:
+        fb[r * CELL + GAP:(r + 1) * CELL - GAP, c * CELL + GAP:(c + 1) * CELL - GAP] = color
 
     def render(self) -> np.ndarray:
-        pal = PALETTE[self.palette]
-        fb = np.full((H, W, 3), DB16[pal["bg"]], dtype=np.uint8)
-
-        for r in range(BRICK_ROWS):
-            color = DB16[pal["rows"][r]]
-            y0 = BRICK_TOP + r * BRICK_H
-            for c in range(BRICK_COLS):
-                if self.bricks[r, c]:
-                    x0 = c * BRICK_W
-                    fb[y0:y0 + BRICK_H - SCALE, x0:x0 + BRICK_W - SCALE] = color   # SCALE-px grid gap
-
-        px = int(self.paddle_x)
-        fb[PADDLE_Y:PADDLE_Y + PADDLE_H, px:px + PADDLE_W] = PADDLE_COLOR
-
-        bx, by = int(self.ball.x), int(self.ball.y)
-        fb[max(by, 0):by + BALL_SIZE, max(bx, 0):bx + BALL_SIZE] = BALL_COLOR
-
+        fb = np.full((H, W, 3), BG_COLOR, dtype=np.uint8)
+        for c, r in self.body[1:]:
+            self._cell(fb, c, r, BODY_COLOR)
+        self._cell(fb, self.body[0][0], self.body[0][1], HEAD_COLOR)
+        self._cell(fb, self.apple[0], self.apple[1], APPLE_COLOR)
         return fb
 
 
-def _keys_to_action(left: bool, right: bool, jump: bool = False) -> int:
-    # jump kept for signature compatibility with infer.py's play loop; Breakout ignores it
-    if left and not right:
-        return 1
-    if right and not left:
-        return 2
-    return 0
+def safe_actions(g: Game) -> list[int]:
+    # actions whose EFFECTIVE move (a reversal keeps the current heading) lands on a free cell.
+    # shared by the data bots + previews; an empty list means every move dies.
+    out = []
+    hc, hr = g.body[0]
+    for a in range(NUM_ACTIONS):
+        eff = g.heading if a == _REVERSE[g.heading] else a
+        dc, dr = DIRS[eff]
+        nh = (hc + dc, hr + dr)
+        if not (0 <= nh[0] < GRID_COLS and 0 <= nh[1] < GRID_ROWS):
+            continue
+        trunk = g.body if nh == g.apple else g.body[:-1]
+        if nh not in trunk:
+            out.append(a)
+    return out
+
+
+def _keys_to_action(up: bool, down: bool, left: bool, right: bool, current: int) -> int:
+    # absolute heading commands; no key pressed -> keep the current heading (the snake always moves)
+    for pressed, a in ((up, UP), (down, DOWN), (left, LEFT), (right, RIGHT)):
+        if pressed:
+            return a
+    return current
 
 
 def play(seed: int = 0) -> None:
     import pygame
     pygame.init()
-    up = max(1, 512 // W)                                # display upscale -> ~512px window at any SCALE
-    screen = pygame.display.set_mode((W * up, H * up))
-    pygame.display.set_caption("nanoOasis (Breakout)")
+    up_scale = max(1, 512 // W)
+    screen = pygame.display.set_mode((W * up_scale, H * up_scale))
+    pygame.display.set_caption("nanoOasis (Snake)")
     clock = pygame.time.Clock()
 
     game = Game(seed=seed)
+    action = UP
     running = True
     while running:
         for event in pygame.event.get():
@@ -199,13 +155,14 @@ def play(seed: int = 0) -> None:
                 running = False
 
         keys = pygame.key.get_pressed()
-        action = _keys_to_action(keys[pygame.K_LEFT], keys[pygame.K_RIGHT])
+        action = _keys_to_action(keys[pygame.K_UP], keys[pygame.K_DOWN],
+                                 keys[pygame.K_LEFT], keys[pygame.K_RIGHT], action)
         frame, _, _ = game.step(action)
         # pygame.surfarray uses (W, H, 3); see BUGS.md H005
         surf = pygame.surfarray.make_surface(np.transpose(frame, (1, 0, 2)))
-        screen.blit(pygame.transform.scale(surf, (W * up, H * up)), (0, 0))
+        screen.blit(pygame.transform.scale(surf, (W * up_scale, H * up_scale)), (0, 0))
         pygame.display.flip()
-        clock.tick(30)
+        clock.tick(7)                                  # tick = one cell move; ~7 cells/s is classic Snake speed
 
     pygame.quit()
 
@@ -216,12 +173,16 @@ if __name__ == "__main__":
     if "--preview" in sys.argv:
         import imageio.v3 as iio
         os.makedirs("assets", exist_ok=True)
-        for palette in PALETTES:
-            g = Game(seed=0, palette=palette)
-            for _ in range(20):                         # step a bit so the ball clears the paddle
-                g.step(0)
-            iio.imwrite(f"assets/preview_{palette}.png", g.render())
-            print(f"wrote assets/preview_{palette}.png")
+        g = Game(seed=0)
+        rng = np.random.default_rng(0)
+        frames = []
+        for t in range(48):
+            safe = safe_actions(g)
+            a = int(rng.choice(safe)) if safe else int(rng.integers(0, NUM_ACTIONS))
+            frames.append(g.step(a)[0])
+        iio.imwrite("assets/preview_snake.png", frames[-1])
+        iio.imwrite("assets/preview_snake_strip.png", np.concatenate(frames[::4], axis=1))
+        print(f"wrote assets/preview_snake.png + strip (eats={g.eats}, deaths={g.deaths})")
     elif "--play" in sys.argv:
         seed = 0
         if "--seed" in sys.argv:
@@ -229,4 +190,4 @@ if __name__ == "__main__":
         play(seed=seed)
     else:
         print("usage: python game.py --play [--seed N]   # interactive upscaled window")
-        print("       python game.py --preview           # write assets/preview_*.png")
+        print("       python game.py --preview           # write assets/preview_snake*.png")

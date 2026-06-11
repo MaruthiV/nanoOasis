@@ -5,7 +5,7 @@ import time
 import numpy as np
 import zstandard as zstd
 
-from data_gen import collect_episode, write_shard, RandomBot, _worker, write_index
+from data_gen import collect_episode, write_shard, RandomBot, SeekBot, _worker, write_index
 from data import EpisodeWindowDataset, WINDOW
 
 from game import Game, W, H
@@ -58,32 +58,40 @@ def test_writer_deterministic_for_same_seed(tmp_path):
     assert a.read_bytes() == b.read_bytes()
 
 
-# ---- D3: random-walk bot ----
+# ---- D3: the data bots ----
 
 
-def test_bot_random_histogram_within_5pct():
+def test_bot_random_uses_all_actions_roughly_evenly():
+    # safe-random (D029): uniform among non-fatal moves -> all 4 actions appear over real play,
+    # decorrelated from the apple (the control-causality property, D022/D026)
+    g = Game(seed=0)
     bot = RandomBot(np.random.default_rng(0))
-    actions = np.fromiter((bot.act(None) for _ in range(5000)), dtype=np.uint8, count=5000)
-    hist = np.bincount(actions, minlength=3) / 5000
-    diff = np.abs(hist - RandomBot.PROBS).max()
-    assert diff < 0.05, (hist.tolist(), RandomBot.PROBS.tolist(), float(diff))
+    actions = []
+    for _ in range(4000):
+        a = bot.act(g)
+        g.step(a)
+        actions.append(a)
+    hist = np.bincount(actions, minlength=4) / len(actions)
+    assert hist.min() > 0.10 and hist.max() < 0.45, hist.tolist()
 
 
-def test_bot_random_stickiness_at_least_3():
-    bot = RandomBot(np.random.default_rng(0))
-    actions = [bot.act(None) for _ in range(2000)]
-    runs = []
-    run_len, cur = 1, actions[0]
-    for a in actions[1:]:
-        if a == cur:
-            run_len += 1
-        else:
-            runs.append(run_len)
-            cur, run_len = a, 1
-    runs.append(run_len)
-    # drop the last run -- it can be truncated by the sample window; first run is full
-    interior = runs[:-1]
-    assert interior and min(interior) >= 3, runs[:20]
+def test_bot_random_survives_much_longer_than_pure_random():
+    # why safe-random exists: pure random on 8x6 dies every handful of ticks -> data of mostly resets
+    g = Game(seed=3)
+    bot = RandomBot(np.random.default_rng(3))
+    for _ in range(2000):
+        g.step(bot.act(g))
+    ticks_per_death = 2000 / max(1, g.deaths)
+    assert ticks_per_death > 30, (g.deaths, ticks_per_death)
+    assert g.deaths > 0                              # self-trapping still happens -> resets stay in the data
+
+
+def test_bot_seek_eats_apples():
+    g = Game(seed=5)
+    bot = SeekBot(np.random.default_rng(5))
+    for _ in range(1000):
+        g.step(bot.act(g))
+    assert g.eats >= 10, g.eats                      # the greedy minority supplies eats/growth/long snakes
 
 
 # ---- D5: parallel collection + parquet index ----
@@ -105,8 +113,8 @@ def test_parallel_writes_n_shards_8020_mix(tmp_path):
     assert table.num_rows == 5
     by_worker = {r["worker_id"]: r for r in table.to_pylist()}
     assert set(by_worker.keys()) == {0, 1, 2, 3, 4}
-    # 80/20 random/tracking (D026): worker 0 (0 % 5 == 0) -> TrackingBot, the other four -> RandomBot
-    assert by_worker[0]["bot_type"] == "TrackingBot"
+    # 80/20 safe-random/seek (D026 analog): worker 0 (0 % 5 == 0) -> SeekBot, the other four -> RandomBot
+    assert by_worker[0]["bot_type"] == "SeekBot"
     assert all(by_worker[w]["bot_type"] == "RandomBot" for w in (1, 2, 3, 4))
     # worker_id 0 -> "val" (0 % 20 == 0); others -> "train"
     assert by_worker[0]["split"] == "val"
@@ -149,3 +157,26 @@ def test_loader_split_filter_partitions_episodes():
     assert len(val_ds.episodes) == 1
     assert {e["split"] for e in train_ds.episodes} == {"train"}
     assert {e["split"] for e in val_ds.episodes} == {"val"}
+
+
+def test_loader_event_frac_puts_done_at_target_frame(tmp_path):
+    # D029 oversampling: with event_frac=1 every window must END on an eat/death
+    frames, actions, dones, level_seeds = collect_episode(seed=11, n_frames=400, bot_cls=SeekBot)
+    assert dones[WINDOW - 1:].sum() > 5                  # the seek bot guarantees events
+    shard = tmp_path / "ep_000.npz.zst"
+    write_shard(shard, frames, actions, dones, level_seeds)
+    write_index([{"episode_id": 0, "path": shard.name, "length": 400, "n_dones": int(dones.sum()),
+                  "n_level_changes": 0, "bot_type": "SeekBot", "worker_id": 1, "split": "train"}],
+                tmp_path / "index.parquet")
+
+    ds = EpisodeWindowDataset(tmp_path / "index.parquet", event_frac=1.0)
+    it = iter(ds)
+    event_starts = set(np.flatnonzero(dones[WINDOW - 1:]).tolist())
+    for _ in range(30):
+        w_frames, w_actions = next(it)
+        assert w_frames.shape[0] == WINDOW
+        # recover the window start by matching the frame content; it must be an event start
+        matches = [s for s in range(400 - WINDOW + 1)
+                   if np.array_equal(frames[s + WINDOW - 1], w_frames[-1])
+                   and np.array_equal(actions[s:s + WINDOW], w_actions)]
+        assert matches and any(s in event_starts for s in matches), "window does not end on an event"

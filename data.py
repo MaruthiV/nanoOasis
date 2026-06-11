@@ -17,7 +17,7 @@ WINDOW = CONTEXT + 1               # +1 target frame -> 17 total
 
 class EpisodeWindowDataset(IterableDataset):
     def __init__(self, index_path, root=None, split: str | None = None,
-                 cache_size: int = 64, seed: int = 0):
+                 cache_size: int = 64, seed: int = 0, event_frac: float = 0.0):
         self.index_path = pathlib.Path(index_path)
         self.root = pathlib.Path(root) if root else self.index_path.parent
         rows = pq.read_table(self.index_path).to_pylist()
@@ -29,6 +29,7 @@ class EpisodeWindowDataset(IterableDataset):
             raise ValueError(f"no episodes of length >= {WINDOW} in {self.index_path}")
         self.cache_size = cache_size
         self.seed = seed
+        self.event_frac = float(event_frac)            # D029: fraction of windows forced to end on a done-event
 
     def _load(self, name: str) -> dict:
         raw = zstd.ZstdDecompressor().decompress((self.root / name).read_bytes())
@@ -43,7 +44,6 @@ class EpisodeWindowDataset(IterableDataset):
         while True:
             ep = self.episodes[int(rng.integers(0, len(self.episodes)))]
             T = ep["length"]
-            start = int(rng.integers(0, T - WINDOW + 1))
 
             data = cache.get(ep["path"])
             if data is None:
@@ -53,6 +53,15 @@ class EpisodeWindowDataset(IterableDataset):
                 cache[ep["path"]] = data
             else:
                 cache.move_to_end(ep["path"])              # mark recently used
+
+            start = int(rng.integers(0, T - WINDOW + 1))
+            if self.event_frac > 0 and "dones" in data and rng.random() < self.event_frac:
+                # event-window oversampling (D029): put an eat/death at the TARGET (last) frame so rare
+                # discrete events aren't drowned by static windows -- the brick-break lesson. The target
+                # is start + WINDOW - 1, so valid starts are exactly flatnonzero(dones[WINDOW-1:]).
+                ev = np.flatnonzero(data["dones"][WINDOW - 1:T])
+                if len(ev):
+                    start = int(ev[int(rng.integers(0, len(ev)))])
 
             arr = data["latents"] if "latents" in data else data["frames"]   # pre-encoded latents or raw frames
             yield arr[start:start + WINDOW], data["actions"][start:start + WINDOW]

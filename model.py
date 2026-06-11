@@ -166,7 +166,8 @@ class DiT(nn.Module):
 
         self.in_proj = nn.Linear(pix, d)
         self.time_emb = TimestepEmbedder(d)
-        self.action_emb = nn.Embedding(self.num_actions, d)
+        # +1 null row: the action-dropout target, enabling classifier-free guidance on action (D029)
+        self.action_emb = nn.Embedding(self.num_actions + 1, d)
 
         # AdaLN-Zero -- DECISIONS D004 (zero-init weight AND bias) + D007 (shared modulator + per-block bias)
         self.adaln_mod = nn.Linear(d, 9 * d)
@@ -197,7 +198,10 @@ class DiT(nn.Module):
         B, T = x.shape[:2]
         h = self.in_proj(patchify(x, self.patch))                    # (B, T, n_spat, d)
         if self.action_mode == "concat":
-            c = self.time_emb(t)                                     # action enters as a token, not into c (M4)
+            # dual path (D029): action as a spatial token (M4, strong response) AND added into the AdaLN
+            # c (DIAMOND injects actions FiLM-style in every block; open-oasis adds them into c) -- the
+            # old concat mode left c with no action signal at all.
+            c = self.time_emb(t) + self.action_emb(action)
             h = torch.cat([self.action_emb(action).unsqueeze(2), h], dim=2)   # (B, T, n_spat+1, d)
             sp_n_skip = 1
         else:

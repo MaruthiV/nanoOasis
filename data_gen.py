@@ -13,46 +13,50 @@ import pathlib
 import numpy as np
 import zstandard as zstd
 
-from game import Game, H, W, PADDLE_W, BALL_SIZE
+from game import (Game, H, W, NUM_ACTIONS, UP, DOWN, LEFT, RIGHT, safe_actions)
 
 
 class RandomBot:
-    # action prior -- {NONE, LEFT, RIGHT}; paddle moves 80% of frames in decisive 3-8 frame holds.
-    # 100% random (no ball-tracking) so the paddle's motion is decorrelated from the ball: the model
-    # can only explain paddle motion via the action, not "follow the ball" (the M7 control bug -- see
-    # docs/TASKS.md CURRENT STATUS). This is the dominant (80%) policy -- the data half of the control fix.
-    PROBS = np.array([0.2, 0.4, 0.4])
-
+    # safe-random (D029): uniform among NON-FATAL moves, held 2-5 ticks. Pure random dies every few
+    # ticks on an 8x6 grid (data becomes mostly resets); safe-random keeps the turns DECORRELATED from
+    # the apple -- the model can only explain a turn via the action, not "chase the apple" (the M7
+    # control-shortcut lesson, D022/D026) -- while still producing real bodies. Deaths still happen
+    # (self-trapping), so reset transitions stay in the data.
     def __init__(self, rng: np.random.Generator):
         self.rng = rng
         self.held_remaining = 0
-        self.current = 0
+        self.current = UP
 
-    def act(self, game: Game) -> int:                # game unused; signature kept for collect_episode
-        if self.held_remaining == 0:
-            self.current = int(self.rng.choice(3, p=self.PROBS))
-            self.held_remaining = int(self.rng.integers(3, 9))   # 3..8 inclusive
-        self.held_remaining -= 1
+    def act(self, g: Game) -> int:
+        safe = safe_actions(g)
+        if self.held_remaining > 0 and (self.current in safe or not safe):
+            self.held_remaining -= 1
+            return self.current
+        self.current = int(self.rng.choice(safe)) if safe else int(self.rng.integers(0, NUM_ACTIONS))
+        self.held_remaining = int(self.rng.integers(2, 6)) - 1     # hold 2-5 ticks total
         return self.current
 
 
-class TrackingBot:
-    # ball-follower: nudge the paddle so its center sits under the ball -> produces real paddle-ball RALLIES
-    # the random policy almost never generates (~1% contact). Used for only ~20% of episodes (D026) so the
-    # paddle-follows-ball shortcut stays diluted (the M7 bug was 50% tracking); the action still drives it.
+class SeekBot:
+    # noisy-greedy toward the apple: produces the eats / growth / long snakes the random policy rarely
+    # reaches. A 20% minority (D026 analog) + 20% random moves keep the chase-the-apple shortcut diluted.
     def __init__(self, rng: np.random.Generator):
         self.rng = rng
 
     def act(self, g: Game) -> int:
-        if self.rng.random() < 0.1:                  # occasional random move -> off-ball paddle positions too
-            return int(self.rng.integers(0, 3))
-        paddle_c = g.paddle_x + PADDLE_W / 2
-        ball_c = g.ball.x + BALL_SIZE / 2
-        if ball_c < paddle_c - 2:
-            return 1
-        if ball_c > paddle_c + 2:
-            return 2
-        return 0
+        safe = safe_actions(g)
+        if not safe:
+            return int(self.rng.integers(0, NUM_ACTIONS))
+        if self.rng.random() < 0.2:
+            return int(self.rng.choice(safe))
+        (hc, hr), (ac, ar) = g.body[0], g.apple
+        prefs = []
+        if ac < hc: prefs.append(LEFT)
+        if ac > hc: prefs.append(RIGHT)
+        if ar < hr: prefs.append(UP)
+        if ar > hr: prefs.append(DOWN)
+        good = [a for a in prefs if a in safe]
+        return int(self.rng.choice(good)) if good else int(self.rng.choice(safe))
 
 
 def collect_episode(seed: int, n_frames: int, bot_cls=RandomBot
@@ -66,12 +70,11 @@ def collect_episode(seed: int, n_frames: int, bot_cls=RandomBot
 
     for t in range(n_frames):
         action = bot.act(g)
-        prev_misses, prev_board = g.misses, g.board
-        frame, _, _ = g.step(action)
+        frame, _, done = g.step(action)
         frames[t] = frame
         actions[t] = action
-        level_seeds[t] = g.board                       # board id in the level_seeds slot (scene reset marker)
-        dones[t] = g.misses > prev_misses or g.board != prev_board
+        dones[t] = done                                # eat OR death -- the loader oversamples these (D029)
+        level_seeds[t] = g.deaths                      # death count in the level_seeds slot (scene-reset marker)
 
     return frames, actions, dones, level_seeds
 
@@ -94,8 +97,8 @@ def _worker(args: tuple) -> list[dict]:
     ep_idx = 0
     while written < n_frames:
         n = min(episode_size, n_frames - written)
-        # 80% random / 20% ball-tracking (D026): deterministic 1-in-5 so episodes are reproducible.
-        bot_cls = TrackingBot if (worker_id + ep_idx) % 5 == 0 else RandomBot
+        # 80% safe-random / 20% apple-seeking (D026 analog): deterministic 1-in-5 so episodes reproduce.
+        bot_cls = SeekBot if (worker_id + ep_idx) % 5 == 0 else RandomBot
         frames, actions, dones, level_seeds = collect_episode(seed + ep_idx, n, bot_cls=bot_cls)
         if episode_size >= n_frames:
             shard_name = f"ep_{worker_id:03d}.npz.zst"
@@ -151,12 +154,12 @@ def main() -> None:
 
     write_index(rows, out / "index.parquet")
     total = sum(r["length"] for r in rows)
-    transitions = sum(r["n_level_changes"] for r in rows)
-    deaths = sum(r["n_dones"] - r["n_level_changes"] for r in rows)
+    deaths = sum(r["n_level_changes"] for r in rows)
+    eats = sum(r["n_dones"] - r["n_level_changes"] for r in rows)
     disk = sum((out / r["path"]).stat().st_size for r in rows)
     print(f"wrote {len(rows)} shards + index.parquet "
-          f"({total} frames, deaths={deaths}, transitions={transitions}, "
-          f"disk={disk / 1024:.1f} KiB)")
+          f"({total} frames, eats={eats}, deaths={deaths}, "
+          f"event rate={100 * (eats + deaths) / total:.1f}%, disk={disk / 1024:.1f} KiB)")
 
 
 if __name__ == "__main__":

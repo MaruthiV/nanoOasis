@@ -92,7 +92,8 @@ def main(stage: str = "dit", config_name: str = "tiny", total_steps: int | None 
 
     # data
     ds = EpisodeWindowDataset(cfg.data.index_path, split="train",
-                              cache_size=cfg.data.cache_size, seed=cfg.seed)
+                              cache_size=cfg.data.cache_size, seed=cfg.seed,
+                              event_frac=float(cfg.data.get("event_frac", 0.0)))
     loader = DataLoader(ds, batch_size=cfg.training.batch_size, num_workers=0)
 
     # frozen VAE -- only needed for raw frames; pre-encoded latents skip it entirely

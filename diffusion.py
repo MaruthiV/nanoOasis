@@ -1,8 +1,6 @@
 # nanoOasis EDM preconditioning + Diffusion Forcing per-frame sigma.
 # DECISIONS D001 (EDM), D002 (Diffusion Forcing). Karras EDM Table 1.
 
-import math
-
 import torch
 import torch.nn as nn
 
@@ -28,11 +26,15 @@ class EDMDiffusion(nn.Module):
         self.forcing = bool(cfg.get("forcing", True))   # D002; False = one shared sigma per window (M2 ablation)
         self.precond_mode = str(cfg.get("precond", "edm"))   # M5; "eps" = naive epsilon-prediction baseline
         self.motion_weight = float(cfg.get("motion_weight", 0.0))   # R5/D018; >0 up-weights moving regions (the ball)
-        # context-noise augmentation (D024): >0 trains the context frames (all but the last/target) at LOW noise,
-        # matching the autoregressive inference regime, so the model learns to predict the next frame from
-        # IMPERFECT history instead of assuming a clean past -> fixes the ball-fade/drift (DIAMOND/GameNGen).
-        self.context_noise_min = float(cfg.get("context_noise_min", 0.01))
+        # context-noise augmentation (D024, recalibrated D029): trains the context frames (all but the
+        # last/target) at a UNIFORM noise in [min, max], so the model learns to predict the next frame from
+        # IMPERFECT history -> the autoregressive-drift fix. GameNGen (2408.14837 §3.2.1) corrupts context up
+        # to ~70% of data std; our Breakout range [0.01, 0.2] vs sigma_data 3.15 was ~10x too weak (D029).
+        self.context_noise_min = float(cfg.get("context_noise_min", 0.002))
         self.context_noise_max = float(cfg.get("context_noise_max", 0.0))   # 0 = off (old full-DF behavior)
+        # action dropout (D029): with prob p the whole window's actions become the NULL action (index
+        # num_actions), so classifier-free guidance on action is available at inference (GameNGen §3.3.1).
+        self.action_dropout = float(cfg.get("action_dropout", 0.0))
         # static-consistency (D025): >0 strongly nails the target-frame regions that DON'T move vs the previous
         # frame (idle bricks/background) so they stay constant instead of flickering every frame. static_thresh
         # = the per-frame-normalized motion below which a region counts as static.
@@ -76,13 +78,16 @@ class EDMDiffusion(nn.Module):
         if sigma is None:
             sigma = self.sample_sigma(B, T, x_clean.device)
         if self.context_noise_max > 0 and T > 1:
-            # the last frame is the prediction target (full DF noise); the context frames get a low
-            # log-uniform noise in [context_noise_min, context_noise_max] so training matches inference
-            # (context held at small sigma_stab) and the model learns to correct imperfect history (D024).
-            lo, hi = math.log(self.context_noise_min), math.log(self.context_noise_max)
+            # the last frame is the prediction target (full DF noise); the context frames get UNIFORM noise
+            # in [context_noise_min, context_noise_max] (GameNGen-style, D029 -- uniform puts real mass at
+            # heavy corruption, unlike the old log-uniform). The per-frame sigma is fed to the model via
+            # c_noise, so inference can hold context at any sigma_stab inside this range.
             u = torch.rand(B, T - 1, device=x_clean.device)
             sigma = sigma.clone()
-            sigma[:, :-1] = (lo + u * (hi - lo)).exp()
+            sigma[:, :-1] = self.context_noise_min + u * (self.context_noise_max - self.context_noise_min)
+        if self.action_dropout > 0 and self.training:
+            drop = torch.rand(B, 1, device=x_clean.device) < self.action_dropout
+            action = action.masked_fill(drop, self.model.num_actions)   # null row -> CFG-ready (D029)
         noise = torch.randn_like(x_clean)
         x_noisy = x_clean + _bcast(sigma) * noise
         D = self.denoise(x_noisy, sigma, action)

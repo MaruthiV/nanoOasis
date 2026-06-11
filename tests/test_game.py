@@ -3,12 +3,17 @@ import hashlib
 import numpy as np
 
 from game import (
-    Game, W, H, NUM_ACTIONS,
-    PADDLE_W, PADDLE_SPEED, PADDLE_Y, BALL_SIZE, BALL_SPEED,
-    BRICK_TOP, BRICK_H, BRICK_VALUE, BRICK_ROWS, BRICK_COLS,
-    PALETTES, PALETTE, DB16,
-    PADDLE_COLOR, BALL_COLOR, _keys_to_action,
+    Game, W, H, NUM_ACTIONS, GRID_COLS, GRID_ROWS, CELL, GAP, START_LEN,
+    UP, DOWN, LEFT, RIGHT, DIRS,
+    BG_COLOR, BODY_COLOR, HEAD_COLOR, APPLE_COLOR,
+    _keys_to_action, safe_actions,
 )
+
+CELL_PX = (CELL - 2 * GAP) ** 2                          # pixels per rendered cell block
+
+
+def _count_cells(frame, color):
+    return int((frame == np.array(color, dtype=np.uint8)).all(axis=2).sum() / CELL_PX)
 
 
 # ---- render ----
@@ -21,156 +26,158 @@ def test_render_shape_and_dtype():
     assert frame.dtype == np.uint8
 
 
-def test_render_contains_paddle_ball_and_bricks():
-    g = Game(seed=0, palette="grey")
-    g.step(0)
-    colors = {tuple(c) for c in g.render().reshape(-1, 3)}
-    assert PADDLE_COLOR in colors
-    assert BALL_COLOR in colors
-    assert DB16[PALETTE["grey"]["rows"][0]] in colors        # top brick row color
-
-
-# ---- the property the pivot exists for: the ball moves every frame ----
-
-
-def test_ball_moves_every_frame():
+def test_render_one_head_one_apple_and_body():
     g = Game(seed=0)
-    prev = (g.ball.x, g.ball.y)
-    for _ in range(200):
-        a = 1 if g.ball.x < g.paddle_x else 2           # track to keep the ball alive
-        g.step(a)
-        assert (g.ball.x, g.ball.y) != prev, "ball stalled during play"
-        prev = (g.ball.x, g.ball.y)
+    frame = g.render()
+    assert _count_cells(frame, HEAD_COLOR) == 1
+    assert _count_cells(frame, APPLE_COLOR) == 1
+    assert _count_cells(frame, BODY_COLOR) == START_LEN - 1
 
 
-def test_ball_speed_is_constant():
-    g = Game(seed=2)
-    for _ in range(300):
-        g.step(0)
-        speed = (g.ball.vx ** 2 + g.ball.vy ** 2) ** 0.5
-        assert abs(speed - BALL_SPEED) < 1e-4, speed
-
-
-# ---- paddle (action) ----
-
-
-def test_paddle_moves_with_action():
+def test_cells_are_token_aligned():
+    # the whole point of the pivot (D028): 1 cell = 1 DiT token = a 32px block
+    assert W // GRID_COLS == CELL and H // GRID_ROWS == CELL
     g = Game(seed=0)
-    x0 = g.paddle_x
-    g.step(2)
-    assert g.paddle_x == x0 + PADDLE_SPEED                       # RIGHT
-    x1 = g.paddle_x
-    g.step(1)
-    assert g.paddle_x == x1 - PADDLE_SPEED                       # LEFT
-    x2 = g.paddle_x
-    g.step(0)
-    assert g.paddle_x == x2                                      # NONE
+    frame = g.render()
+    hc, hr = g.body[0]
+    block = frame[hr * CELL + GAP:(hr + 1) * CELL - GAP, hc * CELL + GAP:(hc + 1) * CELL - GAP]
+    assert (block == np.array(HEAD_COLOR, dtype=np.uint8)).all()
 
 
-def test_paddle_clamped_to_bounds():
+# ---- tick mechanics: one cell per frame ----
+
+
+def test_head_advances_one_cell_per_tick():
     g = Game(seed=0)
-    g.ball.y, g.ball.vy = 10.0, -BALL_SPEED                      # keep the ball up so no miss this step
-    g.paddle_x = float(W - PADDLE_W - 1)
-    g.step(2)
-    assert g.paddle_x == W - PADDLE_W
-    g.ball.y, g.ball.vy = 10.0, -BALL_SPEED
-    g.paddle_x = 1.0
-    g.step(1)
-    assert g.paddle_x == 0.0
+    h0 = g.body[0]
+    g.step(UP)
+    assert g.body[0] == (h0[0], h0[1] - 1)
 
 
-# ---- reflections ----
-
-
-def test_ball_reflects_off_side_wall():
+def test_turn_changes_heading():
     g = Game(seed=0)
-    g.ball.x, g.ball.y = 3.0, 70.0                              # below bricks, above paddle
-    g.ball.vx, g.ball.vy = -BALL_SPEED, 0.0
-    reflected = False
-    for _ in range(6):
-        g.step(0)
-        assert 0 <= g.ball.x <= W - BALL_SIZE
-        reflected = reflected or g.ball.vx > 0
-    assert reflected
+    h0 = g.body[0]
+    g.step(LEFT)
+    assert g.body[0] == (h0[0] - 1, h0[1])
+    assert g.heading == LEFT
 
 
-def test_ball_bounces_off_paddle():
+def test_reversal_is_ignored():
+    g = Game(seed=0)                                     # heading UP
+    h0 = g.body[0]
+    g.step(DOWN)                                         # direct reversal -> keeps going UP
+    assert g.body[0] == (h0[0], h0[1] - 1)
+    assert g.heading == UP
+
+
+def test_tail_vacates_and_length_constant_without_eat():
     g = Game(seed=0)
-    g.paddle_x = 52.0
-    g.ball.x, g.ball.y = 60.0, float(PADDLE_Y - BALL_SIZE)
-    g.ball.vx, g.ball.vy = 0.0, BALL_SPEED                       # descending into the paddle
-    g.step(0)
-    assert g.ball.vy < 0                                         # bounced back up
+    g.apple = (0, GRID_ROWS - 1)                         # park the apple away from the path
+    tail0 = g.body[-1]
+    n0 = len(g.body)
+    g.step(UP)
+    assert len(g.body) == n0
+    assert tail0 not in g.body
 
 
-# ---- bricks ----
+# ---- eat / grow ----
 
 
-def test_brick_break_increments_score():
+def test_eat_grows_and_respawns_apple():
     g = Game(seed=0)
-    assert g.bricks.all()
-    g.ball.x, g.ball.y = 4.0, float(BRICK_TOP + 1)              # inside the top-left cell
-    g.ball.vx, g.ball.vy = 0.0, -BALL_SPEED
-    s0 = g.score
-    g.step(0)
-    assert not g.bricks[0, 0]
-    assert g.score == s0 + BRICK_VALUE
-    assert g.ball.vy > 0                                         # reflected
+    hc, hr = g.body[0]
+    g.apple = (hc, hr - 1)                               # apple directly ahead
+    n0 = len(g.body)
+    frame, reward, done = g.step(UP)
+    assert len(g.body) == n0 + 1
+    assert reward == 1.0 and done                        # done marks the eat event (loader oversampling, D029)
+    assert g.eats == 1 and g.score == 1
+    assert g.apple not in g.body                         # respawned on a free cell
+    assert _count_cells(frame, APPLE_COLOR) == 1
 
 
-def test_board_clears_and_resets():
+# ---- death / reset ----
+
+
+def test_wall_death_resets_and_marks_done():
+    g = Game(seed=0)                                     # head at row 2 heading UP
+    g.step(UP)
+    g.step(UP)                                           # head now at row 0
+    frame, _, done = g.step(UP)                          # off-grid -> death + instant respawn
+    assert done
+    assert g.deaths == 1
+    assert len(g.body) == START_LEN
+    assert g.body[0] == (GRID_COLS // 2, GRID_ROWS // 2 - 1)
+    assert _count_cells(frame, HEAD_COLOR) == 1          # the death frame shows the fresh game
+
+
+def test_self_collision_resets():
     g = Game(seed=0)
-    g.bricks[:] = False
-    g.bricks[0, 0] = True                                        # one brick left
-    b0 = g.board
-    g.ball.x, g.ball.y = 4.0, float(BRICK_TOP + 1)
-    g.ball.vx, g.ball.vy = 0.0, -BALL_SPEED
-    g.step(0)
-    assert g.board == b0 + 1
-    assert g.bricks.all()                                       # fresh board
+    g.body = [(3, 2), (2, 2), (2, 3), (3, 3), (4, 3)]    # head (3,2); (3,3) is mid-body
+    g.heading = RIGHT
+    g.apple = (7, 5)
+    _, _, done = g.step(DOWN)                            # into (3,3) -> death
+    assert done and g.deaths == 1
+    assert len(g.body) == START_LEN
 
 
-# ---- ball loss ----
-
-
-def test_ball_loss_increments_misses_and_relaunches():
+def test_chasing_the_vacating_tail_is_legal():
     g = Game(seed=0)
-    m0 = g.misses
-    g.ball.x, g.ball.y = 60.0, float(H - 1)
-    g.ball.vx, g.ball.vy = 0.0, BALL_SPEED
-    g.step(0)
-    assert g.misses == m0 + 1
-    assert g.ball.y < H                                          # relaunched at once -- no lives, always in play
+    g.body = [(2, 2), (2, 3), (3, 3), (3, 2)]            # square; tail (3,2) right of head (2,2)
+    g.heading = UP
+    g.apple = (7, 5)
+    g.step(RIGHT)                                        # into the cell the tail vacates this tick
+    assert g.deaths == 0
+    assert g.body[0] == (3, 2) and len(g.body) == 4
 
 
 # ---- invariants over a long rollout ----
 
 
-def test_ball_stays_in_bounds():
+def test_apple_never_on_snake_and_states_disjoint():
     g = Game(seed=1)
-    for t in range(2000):
-        a = 1 if g.ball.x + BALL_SIZE / 2 < g.paddle_x + PADDLE_W / 2 else 2
+    rng = np.random.default_rng(1)
+    for _ in range(500):
+        safe = safe_actions(g)
+        a = int(rng.choice(safe)) if safe else int(rng.integers(0, NUM_ACTIONS))
         g.step(a)
-        assert 0 <= g.ball.x <= W - BALL_SIZE, (t, g.ball.x)
-        assert g.ball.y < H, (t, g.ball.y)              # always in play -- a miss relaunches at once
+        assert g.apple not in g.body
+        assert len(set(g.body)) == len(g.body)           # body never overlaps itself
+        for c, r in g.body:
+            assert 0 <= c < GRID_COLS and 0 <= r < GRID_ROWS
+
+
+# ---- safe_actions ----
+
+
+def test_safe_actions_excludes_walls_and_reversal_traps():
+    g = Game(seed=0)
+    g.body = [(4, 0), (4, 1), (4, 2)]                    # head on the top wall, heading UP
+    g.heading = UP
+    g.apple = (0, 5)
+    safe = safe_actions(g)
+    assert UP not in safe                                # straight into the wall
+    assert DOWN not in safe                              # reversal -> effectively UP -> wall
+    assert set(safe) == {LEFT, RIGHT}
 
 
 # ---- key mapping ----
 
 
 def test_keys_to_action():
-    assert NUM_ACTIONS == 3
-    assert _keys_to_action(False, False) == 0                   # NONE
-    assert _keys_to_action(True, False) == 1                    # LEFT
-    assert _keys_to_action(False, True) == 2                    # RIGHT
-    assert _keys_to_action(True, True) == 0                     # both -> cancel
+    assert NUM_ACTIONS == 4
+    assert _keys_to_action(True, False, False, False, RIGHT) == UP
+    assert _keys_to_action(False, True, False, False, RIGHT) == DOWN
+    assert _keys_to_action(False, False, True, False, RIGHT) == LEFT
+    assert _keys_to_action(False, False, False, True, UP) == RIGHT
+    assert _keys_to_action(False, False, False, False, LEFT) == LEFT   # no key -> keep heading
 
 
 # ---- determinism ----
 
 
 def test_determinism_same_seed_same_actions():
-    actions = np.random.default_rng(123).integers(0, 3, size=600)
+    actions = np.random.default_rng(123).integers(0, NUM_ACTIONS, size=600)
 
     def run():
         g = Game(seed=42)
@@ -178,6 +185,6 @@ def test_determinism_same_seed_same_actions():
         for a in actions:
             f, _, _ = g.step(int(a))
             h.update(f.tobytes())
-        return h.hexdigest(), g.score, g.misses, g.board
+        return h.hexdigest(), g.eats, g.deaths
 
     assert run() == run()

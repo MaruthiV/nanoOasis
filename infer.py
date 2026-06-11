@@ -14,8 +14,12 @@ from omegaconf import OmegaConf
 from vae import VAE
 from model import DiT
 from diffusion import EDMDiffusion
-from game import (Game, _keys_to_action, SCALE, W, H, PALETTE, DB16,
-                  BRICK_TOP, BRICK_H, BRICK_W, BRICK_ROWS, BRICK_COLS, BALL_SPEED)
+from game import (Game, _keys_to_action, safe_actions, W, H, CELL, GRID_COLS, GRID_ROWS,
+                  DIRS, UP, DOWN, LEFT, RIGHT, BG_COLOR, BODY_COLOR, HEAD_COLOR, APPLE_COLOR)
+
+# fixed exploratory direction cycle for headless rollouts (a box sweep)
+EVAL_CYCLE = [RIGHT] * 3 + [DOWN] * 3 + [LEFT] * 3 + [UP] * 3
+ACTION_NAMES = ("UP", "DOWN", "LEFT", "RIGHT")
 
 
 def pick_device(spec: str) -> str:
@@ -35,13 +39,20 @@ def edm_sigma_schedule(num_steps: int, sigma_min: float, sigma_max: float,
     return (sigma_max ** (1 / rho) + ramp * (sigma_min ** (1 / rho) - sigma_max ** (1 / rho))) ** rho
 
 
+def make_schedule(cfg, num_steps: int, sigma_max: float, device: str) -> torch.Tensor:
+    # sampling sigma_max decoupled from the training sigma_max 80 (D029): DIAMOND samples from
+    # 10x sigma_data (5.0 with sigma_data 0.5); 0 = use that default.
+    smax = sigma_max if sigma_max > 0 else 10.0 * float(cfg.diffusion.sigma_data)
+    return edm_sigma_schedule(num_steps, cfg.diffusion.sigma_min, smax, device=device)
+
+
 @torch.no_grad()
 def sample_next_frame(diff: EDMDiffusion, z_ctx: torch.Tensor,
                       full_actions: torch.Tensor, sigmas: torch.Tensor,
-                      sigma_stab: float = 0.1, sampler: str = "heun") -> torch.Tensor:
+                      sigma_stab: float = 0.1, sampler: str = "euler") -> torch.Tensor:
     # z_ctx: (B=1, T-1, C, Hp, Wp) clean context; full_actions: (T,) ints incl. the new action.
-    # sampler: "heun" = Karras EDM 2nd-order (deterministic, fewer mode-covering / ghosting artifacts; DIAMOND),
-    #          "euler" = 1st-order baseline.
+    # sampler: "euler" = 1st-order deterministic, the DIAMOND-proven few-step regime (D029);
+    #          "heun" = Karras 2nd-order, quality fallback at >= 8 steps.
     B = z_ctx.shape[0]
     T = z_ctx.shape[1] + 1
     C, Hp, Wp = z_ctx.shape[2:]
@@ -70,7 +81,7 @@ def sample_next_frame(diff: EDMDiffusion, z_ctx: torch.Tensor,
         else:
             x_new = x_euler
     if device.type == "mps":
-        torch.mps.empty_cache()                                # free per-frame so long Heun rollouts don't OOM
+        torch.mps.empty_cache()                                # free per-frame so long rollouts don't OOM
     return x_new
 
 
@@ -84,12 +95,19 @@ def decode_latent(vae: VAE, z: torch.Tensor) -> np.ndarray:
 
 @torch.no_grad()
 def initial_context(vae: VAE, T_ctx: int, seed: int, device: str):
-    g = Game(seed=seed, palette="grey")
-    frames = [g.step(0)[0].copy() for _ in range(T_ctx)]
+    # drive the real game with safe-random moves so the context contains live play, not a reset loop
+    g = Game(seed=seed)
+    rng = np.random.default_rng(seed ^ 0xB07)
+    frames, actions = [], []
+    for _ in range(T_ctx):
+        safe = safe_actions(g)
+        a = int(rng.choice(safe)) if safe else int(rng.integers(0, 4))
+        frames.append(g.step(a)[0].copy())
+        actions.append(a)
     flat = torch.from_numpy(np.stack(frames)).to(device)
     mu, _ = vae.encode(flat)
     z = mu.view(T_ctx, vae.Hp, vae.Wp, vae.latent_channels).permute(0, 3, 1, 2).contiguous()
-    return z.unsqueeze(0), [0] * T_ctx                          # (1, T_ctx, C, Hp, Wp), actions list
+    return z.unsqueeze(0), actions, g                          # g returned for ground-truth continuation
 
 
 def load_models(ckpt_path: str, vae_path: str, config_name: str, device: str):
@@ -109,24 +127,138 @@ def load_models(ckpt_path: str, vae_path: str, config_name: str, device: str):
     return cfg, vae, diff
 
 
-def headless(ckpt_path, vae_path, config_name, n_frames, num_steps, sigma_stab, seed, out_dir):
+# ---- Snake cell readout (the eval harness, D029) ----
+
+_STATE_COLORS = np.array([BG_COLOR, BODY_COLOR, HEAD_COLOR, APPLE_COLOR], dtype=np.float32)
+EMPTY, BODY, HEAD, APPLE = 0, 1, 2, 3
+
+
+def read_grid(f: np.ndarray) -> tuple[np.ndarray, float]:
+    # classify each cell's center patch by nearest canonical color -> (GRID_ROWS, GRID_COLS) state ids,
+    # plus the mean color distance (high = blended/uncommitted cells, the hedging failure signature)
+    grid = np.zeros((GRID_ROWS, GRID_COLS), dtype=int)
+    dist = 0.0
+    for r in range(GRID_ROWS):
+        for c in range(GRID_COLS):
+            patch = f[r * CELL + 12:r * CELL + 20, c * CELL + 12:c * CELL + 20]
+            mean = patch.astype(np.float32).mean(axis=(0, 1))
+            d = np.abs(_STATE_COLORS - mean).sum(axis=1)
+            grid[r, c] = int(d.argmin())
+            dist += float(d.min())
+    return grid, dist / (GRID_ROWS * GRID_COLS)
+
+
+def _head(grid: np.ndarray):
+    ys, xs = np.where(grid == HEAD)
+    return (int(xs[0]), int(ys[0])) if len(xs) == 1 else None
+
+
+def _connected(grid: np.ndarray):
+    # body+head must form one 4-connected component (None if the head isn't unique)
+    cells = {(c, r) for r in range(GRID_ROWS) for c in range(GRID_COLS) if grid[r, c] in (BODY, HEAD)}
+    h = _head(grid)
+    if h is None:
+        return None
+    seen, stack = {h}, [h]
+    while stack:
+        c0, r0 = stack.pop()
+        for dc, dr in ((0, 1), (0, -1), (1, 0), (-1, 0)):
+            n = (c0 + dc, r0 + dr)
+            if n in cells and n not in seen:
+                seen.add(n)
+                stack.append(n)
+    return len(seen) == len(cells)
+
+
+@torch.no_grad()
+def snake_eval(ckpt_path, vae_path, config_name, n_frames, num_steps, sigma_stab, seed, out_dir,
+               sampler="euler", sigma_max=0.0):
+    # reference-free Snake rules check: read the grid out of the GENERATED pixels and verify the model
+    # obeys the game -- one head, one apple, connected body, legal length changes, action obedience.
+    # The numbers are hints; the GATE is playing it (memory: judge-by-playing).
+    import imageio.v3 as iio
+    device = pick_device("auto")
+    cfg, vae, diff = load_models(ckpt_path, vae_path, config_name, device)
+    T_ctx = cfg.dit.context_frames
+    torch.manual_seed(seed)
+
+    z_history, actions, _ = initial_context(vae, T_ctx, seed, device)
+    sigmas = make_schedule(cfg, num_steps, sigma_max, device)
+    grids, blends, frames = [], [], []
+    for t in range(n_frames):
+        a = EVAL_CYCLE[t % len(EVAL_CYCLE)]
+        z_ctx = z_history[:, 1:]
+        full_actions = torch.tensor(actions[1:] + [a], dtype=torch.long, device=device)
+        new_lat = sample_next_frame(diff, z_ctx, full_actions, sigmas, sigma_stab, sampler)
+        z_history = torch.cat([z_ctx, new_lat], dim=1)
+        actions = actions[1:] + [a]
+        f = decode_latent(vae, new_lat)
+        frames.append(f)
+        g, b = read_grid(f)
+        grids.append(g)
+        blends.append(b)
+
+    heads = [_head(g) for g in grids]
+    one_head = sum(int((g == HEAD).sum()) == 1 for g in grids) / n_frames
+    one_apple = sum(int((g == APPLE).sum()) == 1 for g in grids) / n_frames
+    conn = [c for c in (_connected(g) for g in grids) if c is not None]
+    connected = (sum(conn) / len(conn)) if conn else 0.0
+
+    lengths = [int(((g == BODY) | (g == HEAD)).sum()) for g in grids]
+    deltas = [lengths[i] - lengths[i - 1] for i in range(1, n_frames)]
+    # legal deltas: 0 (move), +1 (eat); a reset lands back at the start length 3
+    illegal = sum(1 for i, d in enumerate(deltas, 1) if d not in (0, 1) and lengths[i] != 3)
+
+    # action obedience: the head must move one cell in the commanded direction (reversals keep heading)
+    obeyed = tested = 0
+    for t in range(1, n_frames):
+        h0, h1 = heads[t - 1], heads[t]
+        if h0 is None or h1 is None:
+            continue
+        move = (h1[0] - h0[0], h1[1] - h0[1])
+        if abs(move[0]) + abs(move[1]) != 1:
+            continue                                            # reset/teleport -- not an obedience sample
+        cmd = EVAL_CYCLE[t % len(EVAL_CYCLE)]
+        heading = None
+        if t >= 2 and heads[t - 2] is not None:
+            prev = (h0[0] - heads[t - 2][0], h0[1] - heads[t - 2][1])
+            heading = DIRS.index(prev) if prev in DIRS else None
+        eff = heading if (heading is not None and DIRS[cmd] == (-DIRS[heading][0], -DIRS[heading][1])) else cmd
+        tested += 1
+        obeyed += int(move == DIRS[eff])
+
+    print(f"one head:        {one_head * 100:.0f}% of frames")
+    print(f"one apple:       {one_apple * 100:.0f}% of frames")
+    print(f"body connected:  {connected * 100:.0f}% (of frames with a unique head)")
+    print(f"illegal length:  {illegal} frames (len change not 0/+1 and not a reset)")
+    print(f"length range:    {min(lengths)}..{max(lengths)}")
+    print(f"action obeyed:   {obeyed}/{tested} clean moves")
+    print(f"cell blend dist: {np.mean(blends):.1f} (low = committed cells; high = hedged mush)")
+    out_dir = pathlib.Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    iio.imwrite(out_dir / "eval_strip.png", np.concatenate(frames[:16], axis=1))
+    for i, f in enumerate(frames):
+        iio.imwrite(out_dir / f"frame_{i:04d}.png", f)
+
+
+def headless(ckpt_path, vae_path, config_name, n_frames, num_steps, sigma_stab, seed, out_dir,
+             sampler="euler", sigma_max=0.0):
     import imageio.v3 as iio
     device = pick_device("auto")
     cfg, vae, diff = load_models(ckpt_path, vae_path, config_name, device)
     T_ctx = cfg.dit.context_frames
 
-    z_history, actions = initial_context(vae, T_ctx, seed, device)
-    sigmas = edm_sigma_schedule(num_steps, cfg.diffusion.sigma_min, cfg.diffusion.sigma_max, device=device)
+    z_history, actions, _ = initial_context(vae, T_ctx, seed, device)
+    sigmas = make_schedule(cfg, num_steps, sigma_max, device)
 
     out_dir = pathlib.Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    cycle = [2, 2, 2, 2, 1, 1, 1, 1]                # sweep the paddle right then left (Breakout)
     frames_out: list[np.ndarray] = []
     for i in range(n_frames):
-        action = cycle[i % len(cycle)]
+        action = EVAL_CYCLE[i % len(EVAL_CYCLE)]
         z_ctx = z_history[:, 1:]
         full_actions = torch.tensor(actions[1:] + [action], dtype=torch.long, device=device)
-        new_lat = sample_next_frame(diff, z_ctx, full_actions, sigmas, sigma_stab)
+        new_lat = sample_next_frame(diff, z_ctx, full_actions, sigmas, sigma_stab, sampler)
         z_history = torch.cat([z_ctx, new_lat], dim=1)
         actions = actions[1:] + [action]
         frame = decode_latent(vae, new_lat)
@@ -135,7 +267,6 @@ def headless(ckpt_path, vae_path, config_name, n_frames, num_steps, sigma_stab, 
     # also write a stitched strip for quick eyeball
     strip = np.concatenate(frames_out, axis=1)
     iio.imwrite(out_dir / "strip.png", strip)
-    # crude action-response check
     diffs = [float(np.abs(frames_out[i].astype(int) - frames_out[i - 1].astype(int)).mean())
              for i in range(1, len(frames_out))]
     print(f"wrote {n_frames} frames + strip.png to {out_dir}")
@@ -143,38 +274,31 @@ def headless(ckpt_path, vae_path, config_name, n_frames, num_steps, sigma_stab, 
 
 
 @torch.no_grad()
-def measure_horizon(ckpt_path, vae_path, config_name, n_frames, num_steps, sigma_stab, seed, out_dir):
-    # autoregressive horizon-2x: roll the model and the real game in lockstep on the same actions,
-    # report the t where pixel MSE vs ground truth first exceeds 2x the single-step floor.
+def measure_horizon(ckpt_path, vae_path, config_name, n_frames, num_steps, sigma_stab, seed, out_dir,
+                    sampler="euler", sigma_max=0.0):
+    # autoregressive horizon-2x: roll the model and the real game in lockstep on the same actions.
+    # NOTE: apple respawns are sampled, so model and game legitimately diverge at the first eat/death --
+    # this is a sanity tool, not the gate.
     import imageio.v3 as iio
     device = pick_device("auto")
     cfg, vae, diff = load_models(ckpt_path, vae_path, config_name, device)
     T_ctx = cfg.dit.context_frames
     torch.manual_seed(seed)
 
-    # ground truth: T_ctx context frames (action 0, matching initial_context), then a fixed action sequence
-    g = Game(seed=seed, palette="grey")
-    gt = [g.step(0)[0].copy() for _ in range(T_ctx)]
-    cycle = [2, 2, 2, 2, 1, 1, 1, 1]                # sweep the paddle right then left (Breakout)
-    action_seq = [cycle[i % len(cycle)] for i in range(n_frames)]
-    for a in action_seq:
-        gt.append(g.step(a)[0].copy())
-
-    flat = torch.from_numpy(np.stack(gt[:T_ctx])).to(device)
-    mu, _ = vae.encode(flat)
-    z_history = mu.view(T_ctx, vae.Hp, vae.Wp, vae.latent_channels).permute(0, 3, 1, 2).contiguous().unsqueeze(0)
-    actions = [0] * T_ctx
-    sigmas = edm_sigma_schedule(num_steps, cfg.diffusion.sigma_min, cfg.diffusion.sigma_max, device=device)
+    z_history, actions, g = initial_context(vae, T_ctx, seed, device)
+    action_seq = [EVAL_CYCLE[i % len(EVAL_CYCLE)] for i in range(n_frames)]
+    gt = [g.step(a)[0].copy() for a in action_seq]
+    sigmas = make_schedule(cfg, num_steps, sigma_max, device)
 
     mses, pairs = [], []
     for t, a in enumerate(action_seq):
         z_ctx = z_history[:, 1:]
         full_actions = torch.tensor(actions[1:] + [a], dtype=torch.long, device=device)
-        new_lat = sample_next_frame(diff, z_ctx, full_actions, sigmas, sigma_stab)
+        new_lat = sample_next_frame(diff, z_ctx, full_actions, sigmas, sigma_stab, sampler)
         z_history = torch.cat([z_ctx, new_lat], dim=1)
         actions = actions[1:] + [a]
         m = decode_latent(vae, new_lat)
-        truth = gt[T_ctx + t]
+        truth = gt[t]
         mses.append(float(np.mean((m.astype(np.float32) - truth.astype(np.float32)) ** 2)))
         pairs.append(np.concatenate([truth, m], axis=0))                # truth on top, model below
 
@@ -189,112 +313,48 @@ def measure_horizon(ckpt_path, vae_path, config_name, n_frames, num_steps, sigma
 
 
 @torch.no_grad()
-def action_test(ckpt_path, vae_path, config_name, num_steps, sigma_stab, seed, out_dir):
+def action_test(ckpt_path, vae_path, config_name, num_steps, sigma_stab, seed, out_dir,
+                sampler="euler", sigma_max=0.0):
     # same context + same sampler noise, vary only the action -> isolates how much the model reacts to input
     import imageio.v3 as iio
     device = pick_device("auto")
     cfg, vae, diff = load_models(ckpt_path, vae_path, config_name, device)
     T_ctx = cfg.dit.context_frames
-    z_history, actions = initial_context(vae, T_ctx, seed, device)
+    z_history, actions, _ = initial_context(vae, T_ctx, seed, device)
     z_ctx = z_history[:, 1:]
-    sigmas = edm_sigma_schedule(num_steps, cfg.diffusion.sigma_min, cfg.diffusion.sigma_max, device=device)
+    sigmas = make_schedule(cfg, num_steps, sigma_max, device)
 
-    names = ["NONE", "LEFT", "RIGHT"]
     frames = []
-    for a in range(3):
+    for a in range(4):
         torch.manual_seed(seed)                                          # identical noise across actions
         full_actions = torch.tensor(actions[1:] + [a], dtype=torch.long, device=device)
-        new_lat = sample_next_frame(diff, z_ctx, full_actions, sigmas, sigma_stab)
+        new_lat = sample_next_frame(diff, z_ctx, full_actions, sigmas, sigma_stab, sampler)
         frames.append(decode_latent(vae, new_lat))
-    none = frames[0].astype(np.float32)
-    print("action response (same context + same noise, vary action):")
-    for a in range(3):
-        d = float(np.abs(frames[a].astype(np.float32) - none).mean())
-        print(f"  {a} {names[a]:11s} mean |delta| vs NONE = {d:.2f}/255")
+    base = frames[0].astype(np.float32)
+    print("action response (same context + same noise, vary action; deltas vs UP):")
+    for a in range(4):
+        d = float(np.abs(frames[a].astype(np.float32) - base).mean())
+        print(f"  {a} {ACTION_NAMES[a]:6s} mean |delta| vs UP = {d:.2f}/255")
     out_dir = pathlib.Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     iio.imwrite(out_dir / "action_test.png", np.concatenate(frames, axis=1))
 
 
-@torch.no_grad()
-def plausibility(ckpt_path, vae_path, config_name, n_frames, num_steps, sigma_stab, seed, out_dir):
-    # reference-free Breakout plausibility -- the right metric for a chaotic ball (no ground-truth needed).
-    # reads ball + brick state out of the GENERATED pixels and checks the model obeys the game's rules.
-    import imageio.v3 as iio
-    device = pick_device("auto")
-    cfg, vae, diff = load_models(ckpt_path, vae_path, config_name, device)
-    T_ctx = cfg.dit.context_frames
-    torch.manual_seed(seed)
-
-    pal = PALETTE["grey"]
-    bg = np.array(DB16[pal["bg"]], dtype=int)
-    row_colors = [np.array(DB16[i], dtype=int) for i in pal["rows"]]
-
-    def detect_ball(f):
-        m = (f[:, :, 0] > 200) & (f[:, :, 1] > 200) & (f[:, :, 2] > 200)
-        m[:8 * SCALE, :] = False                            # drop the top HUD + lives strip (scales with the game)
-        ys, xs = np.where(m)
-        return (float(xs.mean()), float(ys.mean())) if len(xs) else None
-
-    def brick_grid(f):
-        g = np.zeros((BRICK_ROWS, BRICK_COLS), dtype=bool)
-        for r in range(BRICK_ROWS):
-            cy = BRICK_TOP + r * BRICK_H + BRICK_H // 2
-            for c in range(BRICK_COLS):
-                px = f[cy, c * BRICK_W + BRICK_W // 2].astype(int)
-                g[r, c] = np.abs(px - row_colors[r]).sum() < np.abs(px - bg).sum()
-        return g
-
-    z_history, actions = initial_context(vae, T_ctx, seed, device)
-    sigmas = edm_sigma_schedule(num_steps, cfg.diffusion.sigma_min, cfg.diffusion.sigma_max, device=device)
-    cycle = [2, 2, 2, 2, 1, 1, 1, 1]
-    balls, grids, frames = [], [], []
-    for t in range(n_frames):
-        a = cycle[t % len(cycle)]
-        z_ctx = z_history[:, 1:]
-        full_actions = torch.tensor(actions[1:] + [a], dtype=torch.long, device=device)
-        new_lat = sample_next_frame(diff, z_ctx, full_actions, sigmas, sigma_stab)
-        z_history = torch.cat([z_ctx, new_lat], dim=1)
-        actions = actions[1:] + [a]
-        f = decode_latent(vae, new_lat)
-        frames.append(f)
-        balls.append(detect_ball(f))
-        grids.append(brick_grid(f))
-
-    ball_rate = sum(b is not None for b in balls) / n_frames
-    speeds = [((balls[i][0] - balls[i - 1][0]) ** 2 + (balls[i][1] - balls[i - 1][1]) ** 2) ** 0.5
-              for i in range(1, n_frames) if balls[i] and balls[i - 1]]
-    play_speeds = [s for s in speeds if s < 4 * BALL_SPEED]      # drop relaunch teleports
-    mean_speed = float(np.mean(play_speeds)) if play_speeds else 0.0
-    speed_cv = float(np.std(play_speeds) / (mean_speed + 1e-6)) if play_speeds else 0.0
-    counts = [int(g.sum()) for g in grids]
-    resurrections = sum(int((grids[i] & ~grids[i - 1]).sum())
-                        for i in range(1, n_frames) if counts[i] - counts[i - 1] <= BRICK_COLS)
-
-    print(f"ball detected:        {ball_rate * 100:.0f}% of frames")
-    print(f"mean ball speed:      {mean_speed:.2f} px/frame  (real game = {BALL_SPEED})")
-    print(f"ball speed variation: {speed_cv:.2f}  (low = constant speed / plausible physics)")
-    print(f"bricks:               {counts[0]} -> {counts[-1]}  (broken over the rollout)")
-    print(f"brick resurrections:  {resurrections}  (cells refilling without a reset; 0 = good world-state memory)")
-    out_dir = pathlib.Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    iio.imwrite(out_dir / "plausibility_strip.png", np.concatenate(frames[:16], axis=1))
-
-
-def play(ckpt_path, vae_path, config_name, num_steps, sigma_stab, seed):
+def play(ckpt_path, vae_path, config_name, num_steps, sigma_stab, seed, sampler="euler", sigma_max=0.0):
     import pygame
     device = pick_device("auto")
     cfg, vae, diff = load_models(ckpt_path, vae_path, config_name, device)
     T_ctx = cfg.dit.context_frames
 
-    z_history, actions = initial_context(vae, T_ctx, seed, device)
-    sigmas = edm_sigma_schedule(num_steps, cfg.diffusion.sigma_min, cfg.diffusion.sigma_max, device=device)
+    z_history, actions, _ = initial_context(vae, T_ctx, seed, device)
+    sigmas = make_schedule(cfg, num_steps, sigma_max, device)
 
     pygame.init()
     screen = pygame.display.set_mode((W * 4, H * 4))
     pygame.display.set_caption("nanoOasis (model)")
     clock = pygame.time.Clock()
 
+    action = actions[-1]
     running = True
     while running:
         for ev in pygame.event.get():
@@ -304,11 +364,12 @@ def play(ckpt_path, vae_path, config_name, num_steps, sigma_stab, seed):
                 running = False
 
         keys = pygame.key.get_pressed()
-        action = _keys_to_action(keys[pygame.K_LEFT], keys[pygame.K_RIGHT], keys[pygame.K_SPACE])
+        action = _keys_to_action(keys[pygame.K_UP], keys[pygame.K_DOWN],
+                                 keys[pygame.K_LEFT], keys[pygame.K_RIGHT], action)
 
         z_ctx = z_history[:, 1:]
         full_actions = torch.tensor(actions[1:] + [action], dtype=torch.long, device=device)
-        new_lat = sample_next_frame(diff, z_ctx, full_actions, sigmas, sigma_stab)
+        new_lat = sample_next_frame(diff, z_ctx, full_actions, sigmas, sigma_stab, sampler)
         z_history = torch.cat([z_ctx, new_lat], dim=1)
         actions = actions[1:] + [action]
 
@@ -316,7 +377,7 @@ def play(ckpt_path, vae_path, config_name, num_steps, sigma_stab, seed):
         surf = pygame.surfarray.make_surface(np.transpose(frame, (1, 0, 2)))   # H005: surfarray is (W,H,3)
         screen.blit(pygame.transform.scale(surf, (W * 4, H * 4)), (0, 0))
         pygame.display.flip()
-        clock.tick(15)
+        clock.tick(7)                                  # tick = one cell move; classic Snake cadence (D029)
 
     pygame.quit()
 
@@ -326,26 +387,30 @@ if __name__ == "__main__":
     p.add_argument("--ckpt", type=str, required=True)
     p.add_argument("--vae", type=str, required=True)
     p.add_argument("--config", type=str, default="tiny")
-    p.add_argument("--steps", type=int, default=8, help="Euler sampler steps per frame")
+    p.add_argument("--steps", type=int, default=4, help="sampler steps per frame (D029: Euler 3-4)")
+    p.add_argument("--sampler", type=str, default="euler", choices=["euler", "heun"])
+    p.add_argument("--sigma-max", type=float, default=0.0, help="sampling sigma_max; 0 = 10x sigma_data (D029)")
     p.add_argument("--sigma-stab", type=float, default=0.1)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--headless", type=int, default=0, help="write N frames + strip.png, no window")
     p.add_argument("--measure-horizon", type=int, default=0, help="short-horizon exact-MSE drift vs the real game")
     p.add_argument("--action-test", action="store_true", help="action-response delta from a fixed context")
-    p.add_argument("--plausibility", type=int, default=0, help="reference-free Breakout plausibility over N frames")
+    p.add_argument("--eval", type=int, default=0, help="reference-free Snake rules check over N frames")
     p.add_argument("--out", type=str, default="assets/infer_smoke")
     args = p.parse_args()
 
-    if args.plausibility > 0:
-        plausibility(args.ckpt, args.vae, args.config, args.plausibility,
-                     args.steps, args.sigma_stab, args.seed, args.out)
+    if args.eval > 0:
+        snake_eval(args.ckpt, args.vae, args.config, args.eval,
+                   args.steps, args.sigma_stab, args.seed, args.out, args.sampler, args.sigma_max)
     elif args.action_test:
-        action_test(args.ckpt, args.vae, args.config, args.steps, args.sigma_stab, args.seed, args.out)
+        action_test(args.ckpt, args.vae, args.config, args.steps, args.sigma_stab, args.seed,
+                    args.out, args.sampler, args.sigma_max)
     elif args.measure_horizon > 0:
         measure_horizon(args.ckpt, args.vae, args.config, args.measure_horizon,
-                        args.steps, args.sigma_stab, args.seed, args.out)
+                        args.steps, args.sigma_stab, args.seed, args.out, args.sampler, args.sigma_max)
     elif args.headless > 0:
         headless(args.ckpt, args.vae, args.config, args.headless,
-                 args.steps, args.sigma_stab, args.seed, args.out)
+                 args.steps, args.sigma_stab, args.seed, args.out, args.sampler, args.sigma_max)
     else:
-        play(args.ckpt, args.vae, args.config, args.steps, args.sigma_stab, args.seed)
+        play(args.ckpt, args.vae, args.config, args.steps, args.sigma_stab, args.seed,
+             args.sampler, args.sigma_max)

@@ -13,6 +13,7 @@ def test_tiny_config_loads_with_required_sections_and_keys():
     assert cfg.dit.hidden_dim == 128
     assert cfg.dit.depth == 4
     assert cfg.dit.context_frames == 4
-    assert cfg.dit.num_actions == 3
+    assert cfg.dit.num_actions == 4                 # UP/DOWN/LEFT/RIGHT (Snake, D028)
     assert cfg.diffusion.forcing is True
+    assert cfg.diffusion.context_noise_max > 0      # the D024/D029 drift fix must never silently vanish
     assert cfg.data.index_path == "data/smoke/index.parquet"

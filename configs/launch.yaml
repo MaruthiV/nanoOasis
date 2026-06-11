@@ -17,30 +17,30 @@ vae:
 
 dit:
   hidden_dim: 512
-  depth: 24                # bumped 16→24 (~104M DiT): capacity to pre-empt the brick flicker (R5); D008 stretch
+  depth: 24                # ~104M DiT (D008 stretch). Gate 3 ONLY -- the small tier is the first ship candidate (D029)
   heads: 8                 # head_dim = 64
   head_dim: 64
-  patch_size: 4            # 256x192 latent 24x32 / 4 = 48 spatial tok/frame (R4/R5 validated; patch 2 = 192 = M6-shaky)
+  patch_size: 4            # 256x192 latent 24x32 / 4 = 48 spatial tok/frame = the 8x6 Snake grid (1 cell = 1 token)
   context_frames: 8        # M3: ctx8 matches ctx16 at ~2.7x less compute
-  num_actions: 3          # NONE/LEFT/RIGHT (Breakout, D018)
-  action_mode: concat     # D023: action as a token (M4) -- ~2x stronger paddle response than AdaLN-add
+  num_actions: 4          # UP/DOWN/LEFT/RIGHT, absolute (Snake, D028)
+  action_mode: concat     # dual path (D029): action token (M4) + AdaLN-add together
   mlp_ratio: 4
 
 diffusion:
-  sigma_data: 3.15         # measured 2026-06-10 on the grey-game launch-VAE latents (D027)
+  sigma_data: 3.15         # GREY-BREAKOUT value -- RE-MEASURE on the Snake launch-VAE latents before any Gate-3 run
   sigma_min: 0.002
   sigma_max: 80.0
   rho: 7.0
   p_mean: -0.4
   p_std: 1.0
   forcing: true
-  motion_weight: 15.0      # R5: up-weight the moving region (the ball) so the DiT can't static-collapse
-  context_noise_min: 0.01  # D024: train context frames at low noise (matches inference) so the model learns
-  context_noise_max: 0.2   # to predict from its own imperfect history -> the validated ball-persistence fix
-  static_weight: 1.0       # D027: dropped 5->1 -- weight 5 froze bricks so they wouldn't BREAK. A light touch
-  static_thresh: 0.1       # dampens idle flicker but lets the ball break bricks; lean on capacity + Heun for stability
-  static_region: 0.55      # still bricks-only (top 55% of rows), so it never touches the ball's play area
-  num_sample_steps: 16
+  motion_weight: 5         # mild (D029): changed cells are whole tokens now
+  context_noise_min: 0.002 # D024/D029: context trained at UNIFORM noise up to ~0.5 x sigma_data
+  context_noise_max: 1.6   # (GameNGen corrupts up to ~70% of data std) -- re-set after sigma_data is measured
+  static_weight: 0.0       # off (D029): the static-vs-events tradeoff was the Breakout killer; reserve lever only
+  static_thresh: 0.1       # only used if static_weight > 0
+  action_dropout: 0.1      # D029: CFG-on-action option
+  num_sample_steps: 4      # Euler 3-4 steps (D029); sampling sigma_max = 10 x sigma_data, not the training 80
 
 training:
   device: auto
@@ -57,7 +57,9 @@ training:
   ckpt_every: 5000
 
 data:
-  # DiT trains on the pre-encoded 8M grey latents (D027). ~195 train episodes cached in RAM.
+  # DiT trains on pre-encoded latents. NOTE: /full + /full_latents on the volume are still GREY BREAKOUT --
+  # regenerate with the Snake game before any Gate-3 run.
   index_path: data/full_latents/index.parquet
   pre_encoded: true
   cache_size: 220          # holds all train latent episodes (needs ~256 GB host RAM, set on train_dit_launch)
+  event_frac: 0.4          # D029: 40% of DiT windows end on an eat/death so the model commits to events
