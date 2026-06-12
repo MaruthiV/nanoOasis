@@ -36,9 +36,10 @@ diffusion:
   motion_weight: 5         # mild (D029): changed cells are whole tokens now; 15 was compensating for a sub-token ball
   context_noise_min: 0.002 # D024/D029: train context frames at UNIFORM noise up to ~0.5 x sigma_data
   context_noise_max: 1.3   # = 0.5 x measured sigma_data 2.6 (GameNGen corrupts up to ~70%; old 0.2 was ~10x too weak)
-  static_weight: 0.0       # off (D029): DIAMOND ships plain uniform MSE; reserve lever if idle cells flicker
+  static_weight: 1.0       # multiplicative (2026-06-12 fix): 2x weight on static cells incl. body interior
   static_thresh: 0.1       # only used if static_weight > 0
-  action_dropout: 0.1      # D029: null-action windows -> classifier-free guidance on action available at inference
+  action_dropout: 0.1      # D029: null-action windows -> CFG-on-action available at inference
+  ar_steps: 1              # DIAMOND training-time AR feedback: one window predicted from own output (2026-06-12)
   num_sample_steps: 4      # Euler 3-4 steps is the DIAMOND-proven regime (D029); sampling sigma_max = 10 x sigma_data
 
 training:

@@ -73,7 +73,25 @@ class EDMDiffusion(nn.Module):
         return _bcast(c_skip) * x_noisy + _bcast(c_out) * f_out
 
     def loss(self, x_clean: torch.Tensor, action: torch.Tensor, sigma: torch.Tensor | None = None):
-        # x_clean: (B, T, C, H, W); action: (B, T)
+        # x_clean: (B, T, C, H, W). Frames beyond the model's context window drive DIAMOND-style
+        # autoregressive feedback: predict the target, splice the (detached) prediction into the next
+        # window's context, predict again -- the model learns to correct its own drifting output.
+        Tm = int(self.model.context_frames)
+        ar = max(0, x_clean.shape[1] - Tm)
+        if ar == 0:
+            l, info, _ = self._loss_window(x_clean, action, sigma)
+            return l, info
+        x_work = x_clean.clone()
+        total = None
+        for k in range(ar + 1):
+            l, info, d_last = self._loss_window(x_work[:, k:k + Tm], action[:, k:k + Tm], None)
+            total = l if total is None else total + l
+            if k < ar:
+                x_work[:, k + Tm - 1] = d_last.detach()   # own prediction becomes context (DIAMOND trainer)
+        return total / (ar + 1), info
+
+    def _loss_window(self, x_clean: torch.Tensor, action: torch.Tensor, sigma: torch.Tensor | None):
+        # one ctx+target window; returns (loss, diagnostics, denoised target estimate)
         B, T = x_clean.shape[:2]
         if sigma is None:
             sigma = self.sample_sigma(B, T, x_clean.device)
@@ -102,6 +120,17 @@ class EDMDiffusion(nn.Module):
             mot = torch.cat([torch.zeros_like(mot[:, :1]), mot], dim=1)               # t=0 has no reference
             mot_norm = mot / (mot.amax(dim=(3, 4), keepdim=True) + 1e-6)              # per-frame spatial max -> [0,1]
             weighted = weighted * (1.0 + self.motion_weight * mot_norm)
+        if self.static_weight > 0 and T > 1:
+            # static-consistency (D025, FIXED 2026-06-12): MULTIPLICATIVE like the motion term, so it
+            # inherits the EDM weighting + target-only structure. The old additive unweighted form taught
+            # "output background when unsure" at high sigma and ERASED the scene (Gate-2 run 2).
+            mot_t = (x_clean[:, -1] - x_clean[:, -2]).abs().mean(dim=1, keepdim=True)   # (B, 1, H, W)
+            mot_t = mot_t / (mot_t.amax(dim=(2, 3), keepdim=True) + 1e-6)
+            static = (mot_t < self.static_thresh).float()
+            if self.static_region < 1.0:                            # legacy bricks-only confinement
+                cut = int(x_clean.shape[3] * self.static_region)
+                static[:, :, cut:, :] = 0.0
+            weighted[:, -1] = weighted[:, -1] * (1.0 + self.static_weight * static)
         per_frame = weighted.mean(dim=(2, 3, 4))                          # (B, T) -- for the sigma-bucket diagnostic
         if self.context_noise_max > 0 and T > 1:
             # predict-next objective (GameNGen/DIAMOND): loss on the TARGET frame only -- the context frames
@@ -110,19 +139,9 @@ class EDMDiffusion(nn.Module):
             loss = weighted[:, -1].mean()
         else:
             loss = weighted.mean()
-        if self.static_weight > 0 and T > 1:
-            # static-consistency (D025): up-weight the target frame's STATIC regions (no motion vs the previous
-            # frame) so idle bricks/background are nailed and don't flicker -- only moving/touched regions change.
-            mot = (x_clean[:, -1] - x_clean[:, -2]).abs().mean(dim=1, keepdim=True)   # (B, 1, H, W)
-            mot_norm = mot / (mot.amax(dim=(2, 3), keepdim=True) + 1e-6)
-            static = (mot_norm < self.static_thresh).float()
-            if self.static_region < 1.0:                            # bricks-only: zero the mask below the brick rows
-                cut = int(x_clean.shape[3] * self.static_region)
-                static[:, :, cut:, :] = 0.0
-            loss = loss + self.static_weight * (static * (D[:, -1] - x_clean[:, -1]) ** 2).mean()
         return loss, {
             "sigma_mean": float(sigma.mean().detach()),
             "sigma_std":  float(sigma.std().detach()),
             "sigma_flat": sigma.detach().flatten(),                       # (B*T,)
             "loss_flat":  per_frame.detach().flatten(),                   # (B*T,) weighted per-frame loss
-        }
+        }, D[:, -1]

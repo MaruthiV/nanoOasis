@@ -87,7 +87,8 @@ def main(stage: str = "dit", config_name: str = "tiny", total_steps: int | None 
     print(f"stage: {stage}  device: {device}  config: {config_name}  steps: {cfg.training.total_steps}")
 
     torch.manual_seed(cfg.seed)
-    T_use = cfg.dit.context_frames                                      # model's RoPE expects exactly this T
+    # extra frames beyond the model window drive DIAMOND-style AR feedback in diffusion.loss
+    T_use = cfg.dit.context_frames + int(cfg.diffusion.get("ar_steps", 0))
     pre_encoded = bool(cfg.data.get("pre_encoded", False))             # shards hold VAE latents -> skip the encode
 
     # data

@@ -38,7 +38,8 @@ diffusion:
   motion_weight: 5         # mild changed-cell up-weight (D029)
   context_noise_min: 0.002 # D024/D029: context trained at uniform noise up to ~0.5 x sigma_data
   context_noise_max: 0.25
-  action_dropout: 0.1      # D029: CFG-on-action option
+  action_dropout: 0.1      # D029: null-action windows -> CFG-on-action available at inference
+  ar_steps: 1              # DIAMOND training-time AR feedback: one window predicted from own output (2026-06-12)
   num_sample_steps: 4      # Euler few-step (D029)
 
 training:

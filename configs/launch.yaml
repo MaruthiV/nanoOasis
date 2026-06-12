@@ -37,9 +37,10 @@ diffusion:
   motion_weight: 5         # mild (D029): changed cells are whole tokens now
   context_noise_min: 0.002 # D024/D029: context trained at UNIFORM noise up to ~0.5 x sigma_data
   context_noise_max: 1.6   # (GameNGen corrupts up to ~70% of data std) -- re-set after sigma_data is measured
-  static_weight: 0.0       # off (D029): the static-vs-events tradeoff was the Breakout killer; reserve lever only
+  static_weight: 1.0       # multiplicative form (2026-06-12 fix): 2x weight on static cells; mirrors small once validated
   static_thresh: 0.1       # only used if static_weight > 0
-  action_dropout: 0.1      # D029: CFG-on-action option
+  action_dropout: 0.1      # D029: null-action windows -> CFG-on-action available at inference
+  ar_steps: 1              # DIAMOND training-time AR feedback: one window predicted from own output (2026-06-12)
   num_sample_steps: 4      # Euler 3-4 steps (D029); sampling sigma_max = 10 x sigma_data, not the training 80
 
 training:

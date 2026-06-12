@@ -49,10 +49,15 @@ def make_schedule(cfg, num_steps: int, sigma_max: float, device: str) -> torch.T
 @torch.no_grad()
 def sample_next_frame(diff: EDMDiffusion, z_ctx: torch.Tensor,
                       full_actions: torch.Tensor, sigmas: torch.Tensor,
-                      sigma_stab: float = 0.1, sampler: str = "euler") -> torch.Tensor:
+                      sigma_stab: float = 0.1, sampler: str = "euler",
+                      cfg_scale: float | None = None) -> torch.Tensor:
     # z_ctx: (B=1, T-1, C, Hp, Wp) clean context; full_actions: (T,) ints incl. the new action.
     # sampler: "euler" = 1st-order deterministic, the DIAMOND-proven few-step regime (D029);
     #          "heun" = Karras 2nd-order, quality fallback at >= 8 steps.
+    # cfg_scale: classifier-free guidance on ACTION (the trained null row, D029); >1 amplifies the
+    # action's pull when drift drowns control. Default off; set via NANO_CFG=1.5 etc.
+    if cfg_scale is None:
+        cfg_scale = float(os.environ.get("NANO_CFG", "0"))
     B = z_ctx.shape[0]
     T = z_ctx.shape[1] + 1
     C, Hp, Wp = z_ctx.shape[2:]
@@ -63,11 +68,16 @@ def sample_next_frame(diff: EDMDiffusion, z_ctx: torch.Tensor,
 
     noisy_ctx = z_ctx + sigma_stab * torch.randn_like(z_ctx)
     x_new = torch.randn(B, 1, C, Hp, Wp, device=device) * sigmas[0]
+    null_actions = torch.full_like(full_actions, diff.model.num_actions)
 
     def deriv(x, sigma):                                       # score-like estimate at the new frame
         sig = torch.cat([torch.full((B, T - 1), sigma_stab, device=device),
                          torch.full((B, 1),     sigma,      device=device)], dim=1)
-        D = diff.denoise(torch.cat([noisy_ctx, x], dim=1), sig, full_actions)
+        x_in = torch.cat([noisy_ctx, x], dim=1)
+        D = diff.denoise(x_in, sig, full_actions)
+        if cfg_scale > 0:
+            D_null = diff.denoise(x_in, sig, null_actions)     # whole-window null matches the dropout regime
+            D = D_null + cfg_scale * (D - D_null)
         return (x - D[:, -1:]) / sigma
 
     for i in range(len(sigmas) - 1):

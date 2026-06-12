@@ -71,6 +71,18 @@ def test_diffusion_forcing_denoise_output_shape_matches_input():
     assert D.shape == x.shape
 
 
+def test_loss_ar_feedback_accepts_extra_frames():
+    # frames beyond the model window drive DIAMOND-style AR feedback; loss must stay finite + backprop
+    diff = _tiny_diff()
+    B = 2
+    T = diff.model.context_frames + 1                  # one AR feedback step
+    x = torch.randn(B, T, 16, LATENT_H, LATENT_W)
+    action = torch.randint(0, 4, (B, T))
+    loss, info = diff.loss(x, action)
+    assert torch.isfinite(loss)
+    loss.backward()
+
+
 def test_diffusion_forcing_c_shape_is_per_frame_not_per_window():
     # gate against BUGS H002 -- per-frame c is the *whole point* of Diffusion Forcing
     m = DiT(_tiny_cfg())
