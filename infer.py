@@ -397,7 +397,7 @@ if __name__ == "__main__":
     p.add_argument("--steps", type=int, default=4, help="sampler steps per frame (D029: Euler 3-4)")
     p.add_argument("--sampler", type=str, default="euler", choices=["euler", "heun"])
     p.add_argument("--sigma-max", type=float, default=0.0, help="sampling sigma_max; 0 = 10x sigma_data (D029)")
-    p.add_argument("--sigma-stab", type=float, default=0.1)
+    p.add_argument("--sigma-stab", type=float, default=0.3)   # locked: run-4 play default (drift-robust, fails soft; D030)
     p.add_argument("--fps", type=int, default=4, help="play-mode tick rate (cells/s)")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--headless", type=int, default=0, help="write N frames + strip.png, no window")
