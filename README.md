@@ -5,11 +5,11 @@ GameNGen / DIAMOND paradigm.** The whole pipeline in ~2,400 lines of readable Py
 for **under $50**, and playable in your browser.
 
 <p align="center">
-  ▶ <a href="https://nano-oasis.vercel.app/"><b>Play the live demo</b></a> &nbsp;·&nbsp; blog <i>(coming soon)</i>
+  <img src="assets/demo.gif" width="560" alt="nanoOasis — a diffusion model generating Snake, frame by frame">
 </p>
 
 <p align="center">
-  <img src="assets/demo.gif" width="560" alt="nanoOasis — a diffusion model generating Snake, frame by frame">
+  <a href="https://nano-oasis.vercel.app/"><b>Live Demo</b></a> &nbsp;·&nbsp; blog <i>(coming soon)</i>
 </p>
 
 <!-- Higher-quality hero option: drag assets/demo.mp4 into a github.com README edit (or any issue/PR comment),
