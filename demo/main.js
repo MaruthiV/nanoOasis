@@ -1,5 +1,14 @@
 // nanoOasis demo loop (Phase 7, W5): input + canvas + the ~4/s tick + the game-over/RETRY flow.
-import * as engine from "./inference.js";
+// Engine is chosen at boot: WebGPU -> local in-browser inference; otherwise -> the WebSocket server (W6).
+let engine;
+
+async function pickEngine() {
+  const forceServer = new URLSearchParams(location.search).has("server");   // ?server -> test the fallback
+  if (!forceServer && navigator.gpu) {
+    try { if (await navigator.gpu.requestAdapter()) return await import("./inference.js"); } catch {}
+  }
+  return await import("./remote.js");                 // server fallback (no WebGPU) -- doesn't load ORT
+}
 
 const SCALE = 3, TICK_MS = 250;                       // ~4 cells/s (the play-test cadence, SNAKE_DESIGN)
 const KEY = { ArrowUp: 0, ArrowDown: 1, ArrowLeft: 2, ArrowRight: 3,
@@ -69,13 +78,19 @@ addEventListener("keydown", (e) => {
 overlay.addEventListener("click", () => { if (!running) newGame(); });
 
 (async function boot() {
-  const cfg = await engine.init("assets");
-  const m = await (await fetch("assets/manifest.json")).json();
-  W = m.game.img_w; H = m.game.img_h;
-  view.width = W * SCALE; view.height = H * SCALE;
-  off = document.createElement("canvas"); off.width = W; off.height = H;
-  o2d = off.getContext("2d"); imgData = o2d.createImageData(W, H);
-  hud.prov.textContent = cfg.webgpu ? "WebGPU" : "WASM (CPU)";
-  document.getElementById("loading").classList.remove("show");
-  newGame();
+  try {
+    engine = await pickEngine();
+    const cfg = await engine.init("assets");
+    const m = await (await fetch("assets/manifest.json")).json();
+    W = m.game.img_w; H = m.game.img_h;
+    view.width = W * SCALE; view.height = H * SCALE;
+    off = document.createElement("canvas"); off.width = W; off.height = H;
+    o2d = off.getContext("2d"); imgData = o2d.createImageData(W, H);
+    hud.prov.textContent = cfg.mode === "server" ? "server (WS)" : (cfg.webgpu ? "WebGPU" : "WASM");
+    document.getElementById("loading").classList.remove("show");
+    newGame();
+  } catch (e) {
+    console.error(e);
+    document.getElementById("loading").textContent = "couldn't start — see console";
+  }
 })();

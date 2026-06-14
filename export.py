@@ -63,6 +63,15 @@ def _inline(path: pathlib.Path) -> None:
         data.unlink()
 
 
+def _to_fp16(path: pathlib.Path) -> None:
+    # half-precision weights -> ~half the download. keep_io_types keeps float32 I/O so inference.js is
+    # unchanged. near-zero quality cost on a noisy diffusion sampler; the real check is playing it (CPU
+    # can't fully exercise fp16 kernels).
+    from onnxconverter_common import float16
+    m16 = float16.convert_float_to_float16(onnx.load(str(path)), keep_io_types=True)
+    onnx.save_model(m16, str(path), save_as_external_data=False)
+
+
 def _census(path: pathlib.Path) -> set[str]:
     ops = {n.op_type for n in onnx.load(str(path)).graph.node}
     flagged = sorted(ops - WEBGPU_OK)
@@ -72,15 +81,15 @@ def _census(path: pathlib.Path) -> set[str]:
     return ops
 
 
-def _parity(path: pathlib.Path, torch_out: torch.Tensor, feeds: dict) -> None:
+def _parity(path: pathlib.Path, torch_out: torch.Tensor, feeds: dict, tol: float = 1e-3) -> None:
     sess = ort.InferenceSession(str(path), providers=["CPUExecutionProvider"])
     onnx_out = sess.run(None, feeds)[0]
     diff = float(np.abs(onnx_out - torch_out.detach().cpu().numpy()).max())
     rel = diff / (float(torch_out.abs().max()) + 1e-9)
-    print(f"  {path.name}: max|onnx - torch| = {diff:.3e}  (rel {rel:.2e})  {'OK' if rel < 1e-3 else 'CHECK'}")
+    print(f"  {path.name}: max|onnx - torch| = {diff:.3e}  (rel {rel:.2e})  {'OK' if rel < tol else 'CHECK'}")
 
 
-def main(ckpt: str, vae_path: str, config_name: str, out_dir: str, n_seeds: int) -> None:
+def main(ckpt: str, vae_path: str, config_name: str, out_dir: str, n_seeds: int, fp16: bool = True) -> None:
     out = pathlib.Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     device = "cpu"                                                       # export on CPU -> portable graphs
@@ -112,10 +121,16 @@ def main(ckpt: str, vae_path: str, config_name: str, out_dir: str, n_seeds: int)
                       input_names=["z"], output_names=["img"], optimize=True)
     _inline(out / "vae_dec.onnx")
 
+    if fp16:
+        _to_fp16(out / "dit.onnx")
+        _to_fp16(out / "vae_dec.onnx")
+        print("\nconverted both to FP16 (float32 I/O preserved -> inference.js unchanged; ~half the size)")
+    tol = 2e-2 if fp16 else 1e-3
+
     print("\n=== W3 parity (ONNX CPU vs PyTorch) ===")
     _parity(out / "dit.onnx", den_out,
-            {"x_in": x_in.numpy(), "sigma": sigma.numpy(), "action": action.numpy()})
-    _parity(out / "vae_dec.onnx", dec_out, {"z": z.numpy()})
+            {"x_in": x_in.numpy(), "sigma": sigma.numpy(), "action": action.numpy()}, tol)
+    _parity(out / "vae_dec.onnx", dec_out, {"z": z.numpy()}, tol)
 
     print("\n=== W2 op census (WebGPU coverage first pass) ===")
     print("  ORT providers in this build:", ort.get_available_providers())
@@ -170,5 +185,6 @@ if __name__ == "__main__":
     p.add_argument("--config", type=str, default="small")
     p.add_argument("--out", type=str, default="demo/assets")
     p.add_argument("--n-seeds", type=int, default=8)
+    p.add_argument("--fp32", action="store_true", help="keep FP32 weights (default: FP16 -> smaller download)")
     args = p.parse_args()
-    main(args.ckpt, args.vae, args.config, args.out, args.n_seeds)
+    main(args.ckpt, args.vae, args.config, args.out, args.n_seeds, fp16=not args.fp32)
