@@ -2,8 +2,8 @@
 // the model + referee run on the server (server/ws.py); we just send actions and draw the streamed frames.
 // main.js loads this instead of inference.js when the browser has no WebGPU.
 
-// set after `modal deploy server/ws.py` (Modal prints the URL; the WS endpoint is wss://<that-host>/ws)
-const SERVER_URL = "wss://REPLACE-WITH-MODAL-URL/ws";
+// the deployed Modal WS server (server/ws.py); redeploy there to change it
+const SERVER_URL = "wss://nano-oasis--nano-oasis-demo-serve.modal.run/ws";
 
 let sock, pending, W, H, lastRgb;
 
