@@ -25,8 +25,7 @@ none of it is coded. A neural net learned the whole game from pixels and now *is
 file that exists only to generate training data — swap it for your own and the same VAE → DiT → browser
 pipeline learns to dream that one instead.
 
-<!-- TODO: swap the # for the live demo URL once the demo is published -->
-> ▶ **[Play the live demo](#)** *(coming soon)* · **[Code](https://github.com/MaruthiV/nanoOasis)** · blog *(coming soon)*
+> ▶ **[Play the live demo](https://nano-oasis.vercel.app/)** · **[Code](https://github.com/MaruthiV/nanoOasis)** · blog *(coming soon)*
 
 ---
 
