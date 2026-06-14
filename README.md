@@ -9,7 +9,7 @@ for **under $50**, and playable in your browser.
 </p>
 
 <p align="center">
-  <a href="https://nano-oasis.vercel.app/"><b>Live Demo</b></a> &nbsp;·&nbsp; blog <i>(coming soon)</i>
+  <a href="https://nano-oasis.vercel.app/"><b>Live Demo</b></a> &nbsp;·&nbsp; <a href="https://huggingface.co/VemVemRu/nanoOasis"><b>Weights</b></a> &nbsp;·&nbsp; blog <i>(coming soon)</i>
 </p>
 
 <!-- Higher-quality hero option: drag assets/demo.mp4 into a github.com README edit (or any issue/PR comment),
@@ -67,11 +67,14 @@ no sub-token objects, clean eat/grow events. The whole recipe transferred unchan
 ```bash
 pip install -e .
 
+# grab the trained weights from HuggingFace
+hf download VemVemRu/nanoOasis dit.pt vae.pt --local-dir checkpoints
+
 # play the trained model locally (pygame window, arrow keys)
-python infer.py --ckpt checkpoints/dit_small_gate2_run4_155k.pt --vae checkpoints/vae_small.pt --config small
+python infer.py --ckpt checkpoints/dit.pt --vae checkpoints/vae.pt --config small
 
 # or play it in the browser (the real demo: WebGPU in-browser inference)
-python export.py                       # DiT + VAE decoder -> demo/assets/*.onnx (FP16)
+python export.py --ckpt checkpoints/dit.pt --vae checkpoints/vae.pt   # -> demo/assets/*.onnx (FP16)
 cd demo && python -m http.server 8080  # open http://localhost:8080 in Chrome
 ```
 
