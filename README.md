@@ -1,14 +1,26 @@
 # nanoOasis
 
-**It's Snake — but there is no game engine.** Every frame you see is generated, one at a time, by a
-13.5M-parameter diffusion model reacting to your arrow keys. The game logic, the physics, the apple, the
-growing body — none of it is coded. A neural net learned the whole game from pixels and now *is* the game.
+**A from-scratch reference implementation of a diffusion world model — the "nanoGPT" of the Oasis /
+GameNGen / DIAMOND paradigm.** The whole pipeline in ~2,400 lines of readable Python, trainable end-to-end
+for **under $50**, and playable in your browser.
 
-nanoOasis is the **"nanoGPT" of diffusion world models**: a small, readable, from-scratch reference
-implementation of the Oasis / GameNGen / DIAMOND paradigm — the entire pipeline in ~2,400 lines of Python,
-trainable end-to-end for **under $50**, and playable in your browser.
+![nanoOasis — a diffusion model generating Snake, frame by frame](assets/demo.gif)
 
-> ▶ **[Code on GitHub](https://github.com/MaruthiV/nanoOasis)** · play it locally (see [Quickstart](#quickstart)) · live demo + blog coming soon
+<!-- Higher-quality hero option: drag assets/demo.mp4 into a github.com README edit (or any issue/PR comment),
+     copy the user-attachments URL GitHub generates, and replace the GIF line above with:
+     <video src="THAT_URL" autoplay loop muted playsinline width="560"></video> -->
+
+
+The demo is **Snake — but there is no game engine.** Every frame is generated, one at a time, by a
+13.5M-parameter diffusion model reacting to your arrow keys. The physics, the apple, the growing body —
+none of it is coded. A neural net learned the whole game from pixels and now *is* the game.
+
+**nanoOasis is the framework; Snake is just the instantiation that proves it works.** The game is one small
+file that exists only to generate training data — swap it for your own and the same VAE → DiT → browser
+pipeline learns to dream that one instead.
+
+<!-- TODO: swap the # for the live demo URL once the demo is published -->
+> ▶ **[Play the live demo](#)** *(coming soon)* · **[Code](https://github.com/MaruthiV/nanoOasis)** · blog *(coming soon)*
 
 ---
 
@@ -17,13 +29,18 @@ trainable end-to-end for **under $50**, and playable in your browser.
 A diffusion **world model** predicts the next frame of a game given the recent frames and your action. Roll
 that forward and you can *play* a game that has no engine behind it — the model improvises each frame.
 
+```mermaid
+flowchart LR
+    G["game.py<br/>(grid Snake)"] -->|"millions of frames<br/>(training only)"| VAE["ViT-VAE<br/>encode"]
+    VAE -->|"48 latent tokens<br/>(1 cell = 1 token)"| DiT["spatiotemporal DiT<br/>predict next latent"]
+    ACT(["⌨ your arrow key"]) --> DiT
+    DiT -->|"next latent"| DEC["VAE<br/>decode"]
+    DEC -->|"256×192 frame"| SCR["🖥 browser canvas"]
+    DEC -.->|"last 8 latents feed back as context"| DiT
 ```
- game.py (Snake)          ViT-VAE                 spatiotemporal DiT              browser
- ───────────────   →   compress 256×192   →   predict next latent given   →   decode + display
- generates data        frame → 48 latent      past 8 latents + action         (WebGPU, ~4 fps)
-                       tokens (1 cell =        (EDM + Diffusion Forcing,
-                        1 token)                Euler, 4 steps)
-```
+
+*Dashed = the autoregressive loop that runs ~4 fps in your browser. `game.py` only feeds training; at play
+time the model is the only thing generating frames.*
 
 1. **`game.py`** is a real grid Snake. It only exists to generate training data — random + apple-seeking
    bots play millions of frames.
