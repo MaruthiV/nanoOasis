@@ -4,11 +4,17 @@
 GameNGen / DIAMOND paradigm.** The whole pipeline in ~2,400 lines of readable Python, trainable end-to-end
 for **under $50**, and playable in your browser.
 
-![nanoOasis — a diffusion model generating Snake, frame by frame](assets/demo.gif)
+<br/>
+
+<p align="center">
+  <img src="assets/demo.gif" width="560" alt="nanoOasis — a diffusion model generating Snake, frame by frame">
+</p>
 
 <!-- Higher-quality hero option: drag assets/demo.mp4 into a github.com README edit (or any issue/PR comment),
-     copy the user-attachments URL GitHub generates, and replace the GIF line above with:
+     copy the user-attachments URL GitHub generates, and replace the <img> above with:
      <video src="THAT_URL" autoplay loop muted playsinline width="560"></video> -->
+
+<br/>
 
 
 The demo is **Snake — but there is no game engine.** Every frame is generated, one at a time, by a
@@ -29,18 +35,11 @@ pipeline learns to dream that one instead.
 A diffusion **world model** predicts the next frame of a game given the recent frames and your action. Roll
 that forward and you can *play* a game that has no engine behind it — the model improvises each frame.
 
-```mermaid
-flowchart LR
-    G["game.py<br/>(grid Snake)"] -->|"millions of frames<br/>(training only)"| VAE["ViT-VAE<br/>encode"]
-    VAE -->|"48 latent tokens<br/>(1 cell = 1 token)"| DiT["spatiotemporal DiT<br/>predict next latent"]
-    ACT(["⌨ your arrow key"]) --> DiT
-    DiT -->|"next latent"| DEC["VAE<br/>decode"]
-    DEC -->|"256×192 frame"| SCR["🖥 browser canvas"]
-    DEC -.->|"last 8 latents feed back as context"| DiT
-```
+<p align="center">
+  <img src="assets/pipeline.png" width="560" alt="nanoOasis pipeline: game.py feeds the ViT-VAE encoder; the DiT predicts the next latent from your action; the VAE decodes it to a frame; the latent loops back as context">
+</p>
 
-*Dashed = the autoregressive loop that runs ~4 fps in your browser. `game.py` only feeds training; at play
-time the model is the only thing generating frames.*
+*`game.py` only feeds training; at play time the model is the only thing generating frames.*
 
 1. **`game.py`** is a real grid Snake. It only exists to generate training data — random + apple-seeking
    bots play millions of frames.
@@ -57,7 +56,7 @@ A diffusion model is a great *renderer* but unreliable at discrete, rare events 
 handled by a tiny deterministic **referee**: the model dreams every pixel, and ~30 lines of rules adjudicate
 wall/self collisions. The model dreams the world; the referee calls the game.
 
-## The honest version
+## Why Snake?
 
 This started as Breakout and failed — a small, fast, *continuous* ball is exactly the regime that fights a
 latent diffusion model, and the one loss knob that kept the ball alive also stopped the bricks from breaking.
@@ -102,21 +101,19 @@ Choices that matter, with the reasoning in `docs/` (decision records) and the pa
 
 ## Repo layout
 
-```
-game.py         grid Snake (data source + the thing the model imitates)
-data_gen.py     parallel bot rollouts → zstd shards
-data.py         windowed loader with event-oversampling
-vae.py          ViT-VAE (256×192 frame ↔ latent)
-model.py        spatiotemporal DiT
-diffusion.py    EDM preconditioning + Diffusion Forcing + context-noise
-train_vae.py    VAE training loop          train.py   DiT training loop
-infer.py        local pygame inference + the eval harness
-export.py       ONNX export (DiT + VAE decoder) + seed contexts
-modal_*.py      Modal cloud entrypoints
-demo/           in-browser WebGPU demo (inference.js sampler + referee, main.js, index.html)
-server/ws.py    WebSocket fallback for non-WebGPU browsers
-configs/        tiny / small / launch YAMLs
-```
+| file | what it does |
+| --- | --- |
+| `game.py` | grid Snake — the data source and the behavior the model imitates |
+| `data_gen.py` · `data.py` | parallel bot rollouts → shards; windowed loader with event-oversampling |
+| `vae.py` | ViT-VAE (256×192 frame ↔ latent) |
+| `model.py` | spatiotemporal DiT |
+| `diffusion.py` | EDM preconditioning + Diffusion Forcing + context-noise |
+| `train_vae.py` · `train.py` | VAE and DiT training loops |
+| `infer.py` | local pygame inference + the eval harness |
+| `export.py` | ONNX export (DiT + VAE decoder) + seed contexts |
+| `demo/` | in-browser WebGPU demo — sampler + referee + canvas UI |
+| `server/ws.py` | WebSocket fallback for non-WebGPU browsers |
+| `modal_*.py` · `configs/` | Modal cloud entrypoints; tiny / small / launch configs |
 
 ## Limitations
 
@@ -125,13 +122,13 @@ several apples, then the long-body coherence frays — diffusion models fumble l
 accumulates over a rollout. The retry-on-death re-seed keeps every life starting from a clean context. This
 is a *reference implementation*, not a product; it's meant to be read and forked.
 
-## Prior art + credits
+## Acknowledgements
 
-Built in the lineage of **DIAMOND** (Alonso et al.), **GameNGen** (Valevski et al.), and **Oasis**
-(Decart / Etched). A pixel-space diffusion Snake also exists ([juraam/snake-diffusion](https://github.com/juraam/snake-diffusion));
-nanoOasis differs in being a full **latent** stack (ViT-VAE + spatiotemporal DiT + Diffusion Forcing), real-time
-few-step play, in-browser WebGPU, and the 1-cell-1-token game design — kept deliberately small and readable,
-in the spirit of [nanoGPT](https://github.com/karpathy/nanoGPT).
+Built in the lineage of [**DIAMOND**](https://arxiv.org/abs/2405.12399) (Alonso et al.),
+[**GameNGen**](https://arxiv.org/abs/2408.14837) (Valevski et al.), and [**Oasis**](https://github.com/etched-ai/open-oasis)
+(Decart / Etched), and written in the spirit of [**nanoGPT**](https://github.com/karpathy/nanoGPT) — small enough to
+read in an evening. nanoOasis differs in being a full **latent** stack (ViT-VAE + spatiotemporal DiT + Diffusion
+Forcing), real-time few-step play, in-browser WebGPU, and the 1-cell-1-token game design.
 
 ## License
 
