@@ -1,9 +1,9 @@
 :root {
-  --bg: #f2efe8;       /* warm off-white -- not white, not dark */
-  --fg: #23202a;       /* near-black, warm */
-  --dim: #8b857c;      /* muted label grey */
+  --bg: #f5f7f9;       /* cool off-white -- not white, not dark */
+  --fg: #22242b;       /* near-black, neutral */
+  --dim: #888e98;      /* cool muted label grey */
   --accent: #c0392f;   /* the apple red */
-  --line: #ddd7ca;     /* hairline / soft border */
+  --line: #e3e6eb;     /* cool hairline / soft border */
   /* overlay sits over the dark game canvas, so its text stays light regardless of the page theme */
   --over-fg: #efece4;
   --over-dim: rgba(239, 236, 228, 0.55);
@@ -23,7 +23,7 @@ h1 span { color: var(--dim); }
 #view {
   display: block; border-radius: 6px; background: #000;
   image-rendering: pixelated;
-  box-shadow: 0 0 0 1px var(--line), 0 14px 36px rgba(40, 35, 28, 0.18);
+  box-shadow: 0 0 0 1px var(--line), 0 14px 36px rgba(30, 35, 45, 0.16);
 }
 .screen {
   position: absolute; inset: 0; display: none; flex-direction: column;
@@ -46,7 +46,7 @@ h1 span { color: var(--dim); }
 
 /* placeholder link to the project repo -- swap the href when the repo is public */
 .repo {
-  position: fixed; right: 16px; bottom: 14px;
+  position: fixed; left: 50%; transform: translateX(-50%); bottom: 14px;
   color: var(--dim); text-decoration: none; font-size: 13px;
   border-bottom: 1px solid transparent; transition: color .15s, border-color .15s;
 }
