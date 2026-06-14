@@ -4,7 +4,9 @@
 GameNGen / DIAMOND paradigm.** The whole pipeline in ~2,400 lines of readable Python, trainable end-to-end
 for **under $50**, and playable in your browser.
 
-<br/>
+<p align="center">
+  ▶ <a href="https://nano-oasis.vercel.app/"><b>Play the live demo</b></a> &nbsp;·&nbsp; blog <i>(coming soon)</i>
+</p>
 
 <p align="center">
   <img src="assets/demo.gif" width="560" alt="nanoOasis — a diffusion model generating Snake, frame by frame">
@@ -24,8 +26,6 @@ none of it is coded. A neural net learned the whole game from pixels and now *is
 **nanoOasis is the framework; Snake is just the instantiation that proves it works.** The game is one small
 file that exists only to generate training data — swap it for your own and the same VAE → DiT → browser
 pipeline learns to dream that one instead.
-
-> ▶ **[Play the live demo](https://nano-oasis.vercel.app/)** · **[Code](https://github.com/MaruthiV/nanoOasis)** · blog *(coming soon)*
 
 ---
 
