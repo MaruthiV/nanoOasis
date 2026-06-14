@@ -31,3 +31,7 @@ data/*
 !data/smoke
 !data/smoke/**
 !data/.gitkeep
+
+# Blog — the post + its images are published on the personal website, not this repo
+# (the draft is docs/blog_draft.md, already covered by docs/*.md above)
+assets/blog/

@@ -8,7 +8,7 @@ of readable Python, trainable end-to-end for **under $50**, and playable in your
 </p>
 
 <p align="center">
-  <a href="https://nano-oasis.vercel.app/"><b>Live Demo</b></a> &nbsp;·&nbsp; <a href="https://huggingface.co/VemVemRu/nanoOasis"><b>Weights</b></a> &nbsp;·&nbsp; blog <i>(coming soon)</i>
+  <a href="https://nano-oasis.vercel.app/" target="_blank" rel="noopener"><b>Live Demo</b></a> &nbsp;·&nbsp; <a href="https://huggingface.co/VemVemRu/nanoOasis" target="_blank" rel="noopener"><b>Weights</b></a> &nbsp;·&nbsp; <a href="https://maruthi.me/blog/nano-oasis" target="_blank" rel="noopener"><b>Blog</b></a>
 </p>
 
 <!-- Higher-quality hero option: drag assets/demo.mp4 into a github.com README edit (or any issue/PR comment),
