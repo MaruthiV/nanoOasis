@@ -1,4 +1,13 @@
-:root { --bg: #0e0b14; --fg: #deeed6; --dim: #8595a1; --accent: #d04648; }
+:root {
+  --bg: #f2efe8;       /* warm off-white -- not white, not dark */
+  --fg: #23202a;       /* near-black, warm */
+  --dim: #8b857c;      /* muted label grey */
+  --accent: #c0392f;   /* the apple red */
+  --line: #ddd7ca;     /* hairline / soft border */
+  /* overlay sits over the dark game canvas, so its text stays light regardless of the page theme */
+  --over-fg: #efece4;
+  --over-dim: rgba(239, 236, 228, 0.55);
+}
 * { box-sizing: border-box; }
 body {
   margin: 0; min-height: 100vh; display: grid; place-items: center;
@@ -8,23 +17,24 @@ body {
 main { text-align: center; padding: 24px; }
 h1 { font-size: 34px; font-weight: 700; margin: 0 0 4px; letter-spacing: -0.5px; }
 h1 span { color: var(--dim); }
-.tag { color: var(--dim); max-width: 560px; margin: 0 auto 20px; }
+.tag { color: var(--dim); max-width: 600px; margin: 0 auto 20px; }
 
 .stage { position: relative; display: inline-block; }
 #view {
   display: block; border-radius: 6px; background: #000;
-  image-rendering: pixelated; box-shadow: 0 0 0 1px #2a2435, 0 18px 50px rgba(0,0,0,.55);
+  image-rendering: pixelated;
+  box-shadow: 0 0 0 1px var(--line), 0 14px 36px rgba(40, 35, 28, 0.18);
 }
 .screen {
   position: absolute; inset: 0; display: none; flex-direction: column;
   align-items: center; justify-content: center; gap: 8px;
-  background: rgba(8,6,12,.72); border-radius: 6px; cursor: pointer;
-  backdrop-filter: blur(2px);
+  background: rgba(10, 8, 12, 0.72); border-radius: 6px; cursor: pointer;
+  backdrop-filter: blur(2px); color: var(--over-fg);
 }
 .screen.show { display: flex; }
 .go-title { font-size: 30px; font-weight: 700; color: var(--accent); }
-.go-sub, #loading { color: var(--fg); }
-.go-reason { color: var(--dim); font-size: 12px; }
+.go-sub, #loading { color: var(--over-fg); }
+.go-reason { color: var(--over-dim); font-size: 12px; }
 #loading { font-size: 16px; }
 
 .hud {
@@ -33,3 +43,11 @@ h1 span { color: var(--dim); }
 }
 .hud b { color: var(--fg); font-weight: 600; }
 .note { color: var(--dim); font-size: 12px; margin-top: 10px; }
+
+/* placeholder link to the project repo -- swap the href when the repo is public */
+.repo {
+  position: fixed; right: 16px; bottom: 14px;
+  color: var(--dim); text-decoration: none; font-size: 13px;
+  border-bottom: 1px solid transparent; transition: color .15s, border-color .15s;
+}
+.repo:hover { color: var(--accent); border-color: var(--accent); }
